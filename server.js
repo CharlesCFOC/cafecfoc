@@ -38,6 +38,7 @@ const DATA_DIR = IS_VERCEL_RUNTIME
 const STORE_FILE = path.join(DATA_DIR, 'store.json');
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7;
 const PASSWORD_PEPPER = 'cafecfoc_local_pepper_v1';
+const SESSION_SIGNING_KEY = String(process.env.SESSION_SIGNING_KEY || `${PASSWORD_PEPPER}:session:v1`);
 const CATEGORIES = ['food', 'drink', 'snack'];
 const MENU_SECTIONS = ['food', 'drink'];
 const ACCOUNTING_LINE_TYPES = ['coin', 'bill'];
@@ -1621,7 +1622,6 @@ async function syncStoreFromSupabase() {
   saveStore();
 }
 
-const sessions = new Map();
 const sseClients = new Map();
 
 function hashPassword(password) {
@@ -1639,17 +1639,91 @@ function parseCookies(req) {
     const [rawKey, ...rest] = entry.trim().split('=');
     const key = rawKey;
     const value = rest.join('=');
-    if (key) acc[key] = decodeURIComponent(value || '');
+    if (key) {
+      try {
+        acc[key] = decodeURIComponent(value || '');
+      } catch {
+        acc[key] = value || '';
+      }
+    }
     return acc;
   }, {});
 }
 
 function setSessionCookie(res, token) {
-  res.setHeader('Set-Cookie', `cafecfoc_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`);
+  const cookieParts = [
+    `cafecfoc_session=${encodeURIComponent(token)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
+  ];
+
+  if (IS_VERCEL_RUNTIME || process.env.NODE_ENV === 'production') {
+    cookieParts.push('Secure');
+  }
+
+  res.setHeader('Set-Cookie', cookieParts.join('; '));
 }
 
 function clearSessionCookie(res) {
-  res.setHeader('Set-Cookie', 'cafecfoc_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+  const cookieParts = [
+    'cafecfoc_session=',
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    'Max-Age=0',
+  ];
+
+  if (IS_VERCEL_RUNTIME || process.env.NODE_ENV === 'production') {
+    cookieParts.push('Secure');
+  }
+
+  res.setHeader('Set-Cookie', cookieParts.join('; '));
+}
+
+function signSessionPayload(payloadB64) {
+  return crypto.createHmac('sha256', SESSION_SIGNING_KEY).update(payloadB64).digest('base64url');
+}
+
+function createSessionToken(userId) {
+  const payload = {
+    userId: String(userId || ''),
+    expiresAt: Date.now() + SESSION_TTL_MS,
+  };
+  const payloadB64 = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const signature = signSessionPayload(payloadB64);
+  return `${payloadB64}.${signature}`;
+}
+
+function parseSessionToken(token) {
+  const rawToken = String(token || '').trim();
+  if (!rawToken) return null;
+
+  const parts = rawToken.split('.');
+  if (parts.length !== 2) return null;
+  const [payloadB64, providedSignature] = parts;
+  if (!payloadB64 || !providedSignature) return null;
+
+  const expectedSignature = signSessionPayload(payloadB64);
+  const expectedBuffer = Buffer.from(expectedSignature);
+  const providedBuffer = Buffer.from(providedSignature);
+  if (expectedBuffer.length !== providedBuffer.length) return null;
+  if (!crypto.timingSafeEqual(expectedBuffer, providedBuffer)) return null;
+
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
+  } catch {
+    return null;
+  }
+
+  const userId = String(payload?.userId || '').trim();
+  const expiresAt = Number(payload?.expiresAt || 0);
+  if (!userId || !Number.isFinite(expiresAt)) return null;
+  if (expiresAt <= Date.now()) return null;
+
+  return { userId, expiresAt };
 }
 
 function publicUser(user) {
@@ -1669,34 +1743,21 @@ function getSessionUser(req) {
   const token = cookies.cafecfoc_session;
   if (!token) return null;
 
-  const session = sessions.get(token);
+  const session = parseSessionToken(token);
   if (!session) return null;
 
-  if (session.expiresAt < Date.now()) {
-    sessions.delete(token);
-    return null;
-  }
-
-  session.expiresAt = Date.now() + SESSION_TTL_MS;
   const user = store.users.find((item) => item.id === session.userId);
-  if (!user) {
-    sessions.delete(token);
-    return null;
-  }
+  if (!user) return null;
 
   return user;
 }
 
 function createSession(userId, res) {
-  const token = crypto.randomUUID();
-  sessions.set(token, { userId, expiresAt: Date.now() + SESSION_TTL_MS });
+  const token = createSessionToken(userId);
   setSessionCookie(res, token);
 }
 
 function destroySession(req, res) {
-  const cookies = parseCookies(req);
-  const token = cookies.cafecfoc_session;
-  if (token) sessions.delete(token);
   clearSessionCookie(res);
 }
 
