@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CafeCFOC - Cafe Management</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <button id="mobile-nav-toggle" type="button" class="mobile-nav-toggle" aria-label="Open navigation" aria-expanded="false" aria-controls="app-sidebar">
+    <span class="mobile-nav-toggle-icon" aria-hidden="true"></span>
+  </button>
+
+  <main class="container">
+    <section id="auth-section" class="auth-grid">
+      <article class="card">
+        <h2>Sign In</h2>
+        <form id="login-form" class="stack">
+          <label>
+            Email
+            <input type="email" name="email" required>
+          </label>
+          <label>
+            Password
+            <input type="password" name="password" required>
+          </label>
+          <button type="submit">Sign In</button>
+        </form>
+      </article>
+
+      <article class="card">
+        <h2>Create Volunteer Account</h2>
+        <form id="register-form" class="stack">
+          <label>
+            Full name
+            <input type="text" name="name" required>
+          </label>
+          <label>
+            Email
+            <input type="email" name="email" required>
+          </label>
+          <label>
+            Password
+            <input type="password" name="password" required>
+          </label>
+          <label>
+            Phone
+            <input type="text" name="phone" placeholder="Optional">
+          </label>
+          <label>
+            Role
+            <select name="role">
+              <option value="volunteer">Volunteer</option>
+              <option value="prep">Prep</option>
+              <option value="manager">Manager</option>
+            </select>
+          </label>
+          <button type="submit">Create account</button>
+        </form>
+      </article>
+    </section>
+
+    <section id="app-section" class="hidden">
+      <div class="app-shell">
+        <div id="mobile-nav-backdrop" class="mobile-nav-backdrop" aria-hidden="true"></div>
+        <aside id="app-sidebar" class="sidebar card">
+          <div class="sidebar-main">
+            <h3>CFOC Caf&eacute;</h3>
+            <nav class="tabs sidebar-tabs">
+              <div class="sidebar-group">
+                <button id="admin-nav-toggle" type="button" class="tab sidebar-group-toggle active" aria-expanded="true">
+                  <span>Admin</span>
+                  <span class="sidebar-group-caret" aria-hidden="true"></span>
+                </button>
+                <div id="admin-subtabs" class="sidebar-subtabs">
+                  <button class="tab tab-sub active" data-view="dashboard">Dashboard</button>
+                  <button class="tab tab-sub" data-view="accounting">Accounting</button>
+                </div>
+              </div>
+              <button class="tab" data-view="menu">Menu</button>
+              <button class="tab" data-view="orders">Order</button>
+              <button class="tab" data-view="planning">Planning</button>
+              <button class="tab" data-view="profile">Profile</button>
+            </nav>
+
+            <section id="sidebar-order-card" class="sidebar-order card">
+              <div class="sidebar-order-head">
+                <div class="sidebar-order-title">
+                  <strong>Order</strong>
+                  <span id="sidebar-order-number" class="muted">#001</span>
+                </div>
+                <div class="sidebar-order-head-actions">
+                  <button id="sidebar-order-toggle" type="button" class="secondary sidebar-order-collapse-btn" aria-label="Collapse" title="Collapse" aria-expanded="true">-</button>
+                  <button id="sidebar-order-clear" type="button" class="secondary">Clear</button>
+                </div>
+              </div>
+              <div id="sidebar-order-items" class="sidebar-order-items">
+                <p class="muted">No item selected.</p>
+              </div>
+              <label class="sidebar-order-note">
+                Note
+                <input type="text" id="sidebar-order-note" placeholder="Optional">
+              </label>
+              <div class="sidebar-order-total">
+                Total:
+                <strong id="sidebar-order-total">0.00 CAD</strong>
+              </div>
+              <button id="sidebar-order-send" type="button" class="sidebar-order-send-btn">Send order</button>
+              <p class="muted sidebar-order-help">1 click on a menu item = +1</p>
+            </section>
+          </div>
+
+          <div class="sidebar-account">
+            <div class="sidebar-account-meta">
+              <strong id="current-user">-</strong>
+              <span id="current-role" class="muted"></span>
+            </div>
+          </div>
+        </aside>
+
+        <div class="content-stack">
+      <section id="view-dashboard" class="view card">
+        <h2>Dashboard</h2>
+        <div class="dashboard-range-row">
+          <label class="dashboard-range-field">
+            From
+            <input id="dashboard-date-from" type="date">
+          </label>
+          <label class="dashboard-range-field">
+            To
+            <input id="dashboard-date-to" type="date">
+          </label>
+          <button id="dashboard-range-reset" type="button" class="secondary">30 days</button>
+        </div>
+        <p id="dashboard-range-label" class="muted dashboard-range-label"></p>
+        <div id="stats" class="stats-grid"></div>
+        <section class="finance-trend-card">
+          <div class="finance-trend-head">
+            <h3>Financial trend (Sales - Expense)</h3>
+            <span id="finance-chart-summary" class="muted"></span>
+          </div>
+          <div id="finance-chart" class="finance-chart"></div>
+        </section>
+        <h3>Recent notifications</h3>
+        <ul id="notif-list" class="plain-list"></ul>
+      </section>
+
+      <section id="view-menu" class="view hidden">
+        <div class="menu-header">
+          <h2>Menu</h2>
+          <div class="menu-header-actions">
+            <div class="menu-header-edit-actions">
+              <button id="menu-save-all" type="button" class="secondary menu-save-all-btn hidden">
+                Save all
+              </button>
+              <select id="menu-add-section" class="menu-add-section hidden" aria-label="Category for new item">
+                <option value="food">Food & Snack</option>
+                <option value="drink">Pop & Drink</option>
+              </select>
+              <button id="menu-add-item" type="button" class="secondary menu-add-item-btn hidden">
+                <span aria-hidden="true">+</span>
+                Add item
+              </button>
+              <button id="menu-edit-toggle" type="button" class="secondary menu-edit-btn">
+                <span aria-hidden="true">&#9998;</span>
+              </button>
+            </div>
+            <button id="menu-customer-toggle" type="button" class="secondary menu-customer-toggle" aria-pressed="false" title="Enable customer mode">
+              <svg class="menu-customer-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M2.5 12s3.6-6 9.5-6 9.5 6 9.5 6-3.6 6-9.5 6-9.5-6-9.5-6Z"></path>
+                <circle cx="12" cy="12" r="2.6"></circle>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <section id="mobile-menu-order-card" class="sidebar-order card mobile-menu-order">
+          <div class="sidebar-order-head">
+            <div class="sidebar-order-title">
+              <strong>Order</strong>
+              <span id="mobile-sidebar-order-number" class="muted">#001</span>
+            </div>
+            <div class="sidebar-order-head-actions">
+              <button id="mobile-sidebar-order-toggle" type="button" class="secondary sidebar-order-collapse-btn" aria-label="Collapse" title="Collapse" aria-expanded="true">-</button>
+              <button id="mobile-sidebar-order-clear" type="button" class="secondary">Clear</button>
+            </div>
+          </div>
+          <div id="mobile-sidebar-order-items" class="sidebar-order-items">
+            <p class="muted">No item selected.</p>
+          </div>
+          <label class="sidebar-order-note">
+            Note
+            <input type="text" id="mobile-sidebar-order-note" placeholder="Optional">
+          </label>
+          <div class="sidebar-order-total">
+            Total:
+            <strong id="mobile-sidebar-order-total">0.00 CAD</strong>
+          </div>
+          <button id="mobile-sidebar-order-send" type="button" class="sidebar-order-send-btn">Send order</button>
+          <p class="muted sidebar-order-help">1 click on a menu item = +1</p>
+        </section>
+
+        <h3>Food & Snack</h3>
+        <div id="menu-food-grid" class="menu-product-grid"></div>
+
+        <h3>Pop & Drink</h3>
+        <div id="menu-drink-grid" class="menu-product-grid"></div>
+      </section>
+
+      <section id="view-caisse" class="view card hidden">
+        <h2>Simple Register (No payment)</h2>
+        <form id="cart-add-form" class="row-form">
+          <select name="productId" id="cart-product" required></select>
+          <input type="number" step="1" min="1" name="qty" value="1" required>
+          <button type="submit">Add to cart</button>
+        </form>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Product</th>
+                <th>Qty</th>
+                <th>Price</th>
+                <th>Total</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="cart-body"></tbody>
+          </table>
+        </div>
+
+        <p><strong>Totals:</strong> <span id="cart-totals">-</span></p>
+        <label>
+          Team order note
+          <input type="text" id="order-notes" placeholder="Optional">
+        </label>
+        <div class="toolbar-actions">
+          <button id="sale-btn" type="button">Record sale</button>
+          <button id="order-btn" type="button">Send to team</button>
+          <button id="clear-cart-btn" type="button" class="secondary">Clear cart</button>
+        </div>
+
+        <h3>Sales history</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Register</th>
+                <th>Totals</th>
+              </tr>
+            </thead>
+            <tbody id="sales-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="view-orders" class="view card hidden">
+        <h2>Order</h2>
+        <div class="orders-tabs" role="tablist" aria-label="Order list">
+          <button id="orders-tab-active" type="button" class="orders-tab active" data-orders-tab="active">Active</button>
+          <button id="orders-tab-archive" type="button" class="orders-tab" data-orders-tab="archive">Archive</button>
+        </div>
+        <div id="orders-list-active" class="card-list"></div>
+        <div id="orders-list-archive" class="card-list hidden"></div>
+      </section>
+
+      <section id="view-accounting" class="view hidden">
+        <h2>Accounting</h2>
+        <p class="muted">Manual count for coins and bills (CAD) with double validation.</p>
+
+        <form id="accounting-form" class="stack">
+          <section class="accounting-block accounting-counts-block">
+            <div class="accounting-cards">
+              <section class="accounting-type-card">
+                <h3>Coins</h3>
+                <div class="table-wrap">
+                  <table class="accounting-table accounting-table-narrow">
+                    <thead>
+                      <tr>
+                        <th>Denomination</th>
+                        <th>Quantity</th>
+                        <th>Subtotal</th>
+                      </tr>
+                    </thead>
+                    <tbody id="accounting-coins-body"></tbody>
+                  </table>
+                </div>
+                <div class="accounting-card-total">
+                  Total coins:
+                  <strong id="accounting-coins-total">0.00 CAD</strong>
+                </div>
+              </section>
+
+              <section class="accounting-type-card">
+                <h3>Bills</h3>
+                <div class="table-wrap">
+                  <table class="accounting-table accounting-table-narrow">
+                    <thead>
+                      <tr>
+                        <th>Denomination</th>
+                        <th>Quantity</th>
+                        <th>Subtotal</th>
+                      </tr>
+                    </thead>
+                    <tbody id="accounting-bills-body"></tbody>
+                  </table>
+                </div>
+                <div class="accounting-card-total">
+                  Total bills:
+                  <strong id="accounting-bills-total">0.00 CAD</strong>
+                </div>
+              </section>
+
+              <section class="accounting-type-card accounting-electronic-card">
+                <h3>Electronic payment</h3>
+                <div class="table-wrap">
+                  <table class="accounting-table accounting-table-narrow">
+                    <thead>
+                      <tr>
+                        <th>Type</th>
+                        <th>Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td data-label="Type">Visa amount</td>
+                        <td data-label="Amount">
+                          <input type="number" min="0" step="0.01" name="visaAmount" value="0" data-action="accounting-count-change">
+                        </td>
+                      </tr>
+                      <tr>
+                        <td data-label="Type">Credit amount</td>
+                        <td data-label="Amount">
+                          <input type="number" min="0" step="0.01" name="creditAmount" value="0" data-action="accounting-count-change">
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="accounting-card-total">
+                  Total electronic:
+                  <strong id="accounting-electronic-total">0.00 CAD</strong>
+                </div>
+              </section>
+
+              <section class="accounting-type-card accounting-expense-card">
+                <h3>Expense</h3>
+                <div class="table-wrap">
+                  <table class="accounting-table accounting-table-narrow">
+                    <thead>
+                      <tr>
+                        <th>Type</th>
+                        <th>Value</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td data-label="Type">Expense amount</td>
+                        <td data-label="Value">
+                          <input type="number" min="0" step="0.01" name="expenseAmount" value="0" data-action="accounting-count-change">
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="accounting-card-total">
+                  Total expense:
+                  <strong id="accounting-expense-total">0.00 CAD</strong>
+                </div>
+              </section>
+            </div>
+
+            <div class="accounting-total">
+              Count total:
+              <strong id="accounting-total">0.00 CAD</strong>
+            </div>
+          </section>
+
+          <section class="accounting-block accounting-signatures-block">
+            <div class="accounting-sign-grid">
+              <label>
+                Submission date
+                <input type="date" name="countDate" required>
+              </label>
+              <label>
+                Counted by
+                <input type="text" name="countedBy" required>
+              </label>
+              <label>
+                Signature (Counted by)
+                <input type="text" name="countedSignature" required>
+              </label>
+              <label>
+                Verified by
+                <input type="text" name="verifiedBy" required>
+              </label>
+              <label>
+                Signature (Verified by)
+                <input type="text" name="verifiedSignature" required>
+              </label>
+            </div>
+
+            <label>
+              Note
+              <textarea name="notes" rows="2" placeholder="Optional"></textarea>
+            </label>
+
+            <div class="accounting-actions">
+              <button id="accounting-submit-btn" type="submit">Submit count</button>
+            </div>
+          </section>
+        </form>
+
+        <section class="accounting-archive-block">
+          <h3>Archive / count history</h3>
+          <div id="accounting-history-body" class="accounting-history-list"></div>
+        </section>
+      </section>
+
+      <section id="view-planning" class="view card hidden">
+        <h2>Planning & tasks</h2>
+        <div class="planning-service-header">
+          <h3>Daily service (next 4 weeks)</h3>
+          <button id="planning-edit-toggle" type="button" class="secondary planning-edit-btn">Edit planning</button>
+        </div>
+        <p class="muted">Enable edit mode, then click a day to assign volunteers.</p>
+        <div id="service-weeks" class="service-weeks"></div>
+
+        <div id="service-drawer-backdrop" class="service-drawer-backdrop"></div>
+        <aside id="service-drawer" class="service-drawer" aria-hidden="true" data-date="">
+          <div class="service-drawer-head">
+            <h4 id="service-drawer-title">Service assignment</h4>
+            <button id="service-drawer-close" type="button" class="secondary">Close</button>
+          </div>
+
+          <label>
+            Team
+            <div class="service-drawer-assign-row">
+              <select id="service-volunteer-select" aria-label="Choose a team member"></select>
+              <button id="service-volunteer-assign" type="button">Assign</button>
+            </div>
+          </label>
+
+          <div id="service-assigned-list" class="service-assigned-list"></div>
+        </aside>
+
+        <h3>Manual tasks</h3>
+        <form id="task-form" class="row-form">
+          <input type="text" name="title" placeholder="Task title" required>
+          <input type="date" name="date" required>
+          <input type="time" name="start" required>
+          <input type="time" name="end" required>
+          <select name="assignedTo" id="task-assignee">
+            <option value="">Assign later</option>
+          </select>
+          <input type="text" name="description" placeholder="Description">
+          <button type="submit">Add task</button>
+        </form>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Task</th>
+                <th>Assigned to</th>
+                <th>Status</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="tasks-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="view-profile" class="view card hidden">
+        <h2>Profile</h2>
+        <form id="profile-form" class="stack">
+          <label>
+            Name
+            <input type="text" name="name" required>
+          </label>
+          <label>
+            Email (read-only)
+            <input type="email" name="email" disabled>
+          </label>
+          <label>
+            Phone
+            <input type="text" name="phone">
+          </label>
+          <label>
+            Preferred currency
+            <input type="text" name="preferredCurrency" maxlength="3" placeholder="CAD">
+          </label>
+          <button type="submit">Update profile</button>
+        </form>
+        <div class="profile-logout-row">
+          <button id="logout-btn" type="button" class="secondary">Log out</button>
+        </div>
+
+        <h3>Notifications</h3>
+        <div class="profile-notif-row">
+          <label class="notif-toggle" for="profile-notif-toggle">
+            <input id="profile-notif-toggle" type="checkbox">
+            <span class="notif-toggle-slider" aria-hidden="true"></span>
+            <span>Enable push notifications</span>
+          </label>
+          <span id="profile-notif-status" class="muted"></span>
+        </div>
+
+        <h3>Change password</h3>
+        <form id="password-form" class="stack">
+          <label>
+            Current password
+            <input type="password" name="oldPassword" required>
+          </label>
+          <label>
+            New password
+            <input type="password" name="newPassword" required>
+          </label>
+          <button type="submit">Change password</button>
+        </form>
+      </section>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="payment-modal" class="payment-modal hidden" role="dialog" aria-modal="true" aria-labelledby="payment-modal-title">
+    <div class="payment-modal-card card">
+      <p class="payment-modal-tag">Confirmation</p>
+      <h3 id="payment-modal-title">Confirm order <span id="payment-modal-order-number">#001</span></h3>
+      <p id="payment-modal-amount" class="payment-modal-amount">Payment: 0.00 CAD</p>
+      <div class="payment-modal-actions">
+        <button id="payment-modal-cancel" type="button" class="secondary">Cancel</button>
+        <button id="payment-modal-confirm" type="button">Confirm payment</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-container"></div>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
