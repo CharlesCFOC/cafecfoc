@@ -31,7 +31,10 @@ loadDotEnv();
 
 const PORT = Number(process.env.PORT || 3010);
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const DATA_DIR = path.join(__dirname, 'data');
+const IS_VERCEL_RUNTIME = Boolean(process.env.VERCEL);
+const DATA_DIR = IS_VERCEL_RUNTIME
+  ? path.join('/tmp', 'cafecfoc-data')
+  : path.join(__dirname, 'data');
 const STORE_FILE = path.join(DATA_DIR, 'store.json');
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7;
 const PASSWORD_PEPPER = 'cafecfoc_local_pepper_v1';
@@ -3270,9 +3273,45 @@ function serveStatic(req, res, pathname) {
   });
 }
 
-const server = http.createServer(async (req, res) => {
+let appInitPromise = null;
+
+async function initializeApp({ log = true } = {}) {
+  if (SUPABASE_ENABLED) {
+    try {
+      await syncStoreFromSupabase();
+      supabaseReady = true;
+      if (log) {
+        console.log('Supabase persistence active (full store).');
+      }
+    } catch (err) {
+      supabaseReady = false;
+      if (log) {
+        console.error(`Supabase init error: ${err.message}`);
+        console.error('Server started in local read mode, but Supabase writes are blocked until the connection is ready.');
+      }
+    }
+  } else if (log) {
+    console.log('Supabase not configured: local storage only.');
+  }
+}
+
+function ensureAppInitialized(options = {}) {
+  if (appInitPromise) return appInitPromise;
+
+  appInitPromise = initializeApp(options).catch((err) => {
+    appInitPromise = null;
+    throw err;
+  });
+
+  return appInitPromise;
+}
+
+async function requestHandler(req, res) {
   try {
-    const url = new URL(req.url, `http://${req.headers.host}`);
+    await ensureAppInitialized({ log: !IS_VERCEL_RUNTIME });
+
+    const host = req.headers.host || 'localhost';
+    const url = new URL(req.url, `http://${host}`);
     const pathname = decodeURIComponent(url.pathname);
 
     if (pathname.startsWith('/api/')) {
@@ -3286,30 +3325,24 @@ const server = http.createServer(async (req, res) => {
     console.error(err);
     sendJson(res, 500, { error: 'Internal server error' });
   }
-});
-
-setInterval(() => {
-  broadcast('server:ping', { at: new Date().toISOString() });
-}, 25_000);
-
-async function startServer() {
-  if (SUPABASE_ENABLED) {
-    try {
-      await syncStoreFromSupabase();
-      supabaseReady = true;
-      console.log('Supabase persistence active (full store).');
-    } catch (err) {
-      supabaseReady = false;
-      console.error(`Supabase init error: ${err.message}`);
-      console.error('Server started in local read mode, but Supabase writes are blocked until the connection is ready.');
-    }
-  } else {
-    console.log('Supabase not configured: local storage only.');
-  }
-
-  server.listen(PORT, () => {
-    console.log(`CafeCFOC running on http://localhost:${PORT}`);
-  });
 }
 
-startServer();
+if (IS_VERCEL_RUNTIME) {
+  module.exports = requestHandler;
+} else {
+  const server = http.createServer(requestHandler);
+
+  setInterval(() => {
+    broadcast('server:ping', { at: new Date().toISOString() });
+  }, 25_000);
+
+  async function startServer() {
+    await ensureAppInitialized({ log: true });
+
+    server.listen(PORT, () => {
+      console.log(`CafeCFOC running on http://localhost:${PORT}`);
+    });
+  }
+
+  startServer();
+}
