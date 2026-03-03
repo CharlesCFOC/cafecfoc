@@ -1245,6 +1245,7 @@ td {
 .accounting-signatures-block {
   display: grid;
   gap: 0.6rem;
+  background: rgba(196, 196, 196, 0.52);
 }
 
 .accounting-type-card {
