@@ -66,6 +66,9 @@ const supabaseSyncedRowHashes = new Map();
 let usersRefreshPromise = null;
 let usersLastRefreshAt = 0;
 const USERS_REFRESH_THROTTLE_MS = 1_500;
+let menuItemsRefreshPromise = null;
+let menuItemsLastRefreshAt = 0;
+const MENU_ITEMS_REFRESH_THROTTLE_MS = 1_500;
 let ordersRefreshPromise = null;
 let ordersLastRefreshAt = 0;
 const ORDERS_REFRESH_THROTTLE_MS = 700;
@@ -1622,6 +1625,7 @@ async function syncStoreFromSupabase() {
       store.menuItems.map((item, index) => localMenuItemToDb(item, index)),
       (row) => String(row.id || ''),
     );
+    menuItemsLastRefreshAt = Date.now();
   } else if (store.menuItems.length > 0) {
     await syncRowsByIdInSupabase(
       SUPABASE_MENU_ITEMS_TABLE,
@@ -1744,6 +1748,42 @@ function refreshUsersFromSupabase({ force = false } = {}) {
   });
 
   return usersRefreshPromise;
+}
+
+function refreshMenuItemsFromSupabase({ force = false } = {}) {
+  if (!SUPABASE_ENABLED) {
+    return Promise.resolve();
+  }
+
+  const now = Date.now();
+  if (!force && (now - menuItemsLastRefreshAt) < MENU_ITEMS_REFRESH_THROTTLE_MS) {
+    return Promise.resolve();
+  }
+
+  if (menuItemsRefreshPromise) {
+    return menuItemsRefreshPromise;
+  }
+
+  menuItemsRefreshPromise = (async () => {
+    const remoteMenuItems = await loadMenuItemsFromSupabase();
+    if (Array.isArray(remoteMenuItems) && remoteMenuItems.length > 0) {
+      const localBestsellerById = new Map((store.menuItems || []).map((item) => [item.id, Boolean(item.bestseller)]));
+      store.menuItems = remoteMenuItems.map((item) => ({
+        ...item,
+        bestseller: localBestsellerById.get(item.id) || false,
+      }));
+      setSupabaseHashState(
+        SUPABASE_MENU_ITEMS_TABLE,
+        store.menuItems.map((item, index) => localMenuItemToDb(item, index)),
+        (row) => String(row.id || ''),
+      );
+    }
+    menuItemsLastRefreshAt = Date.now();
+  })().finally(() => {
+    menuItemsRefreshPromise = null;
+  });
+
+  return menuItemsRefreshPromise;
 }
 
 function refreshOrdersFromSupabase({ force = false } = {}) {
@@ -2834,6 +2874,13 @@ async function handleApi(req, res, pathname, user) {
 
   if (pathname === '/api/menu-items') {
     if (method === 'GET') {
+      if (SUPABASE_ENABLED && IS_VERCEL_RUNTIME) {
+        try {
+          await refreshMenuItemsFromSupabase();
+        } catch (err) {
+          console.error(`Menu items refresh error: ${err.message}`);
+        }
+      }
       return sendJson(res, 200, { menuItems: store.menuItems });
     }
 

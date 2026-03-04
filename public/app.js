@@ -1620,6 +1620,7 @@ function showAuth() {
 
   applyMenuCustomerModeState();
   renderAuthCarousel();
+  document.body.classList.remove('app-booting');
 }
 
 function showApp() {
@@ -1628,6 +1629,7 @@ function showApp() {
   document.body.classList.add('app-active');
   applyMobileNavState();
   startOrdersRealtimePolling();
+  document.body.classList.remove('app-booting');
 }
 
 function addNotification(message, withBrowser = false) {

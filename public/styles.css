@@ -24,6 +24,28 @@ body {
   min-height: 100vh;
 }
 
+.boot-loader {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(160deg, #ededed, var(--bg) 45%, var(--bg-alt));
+  font-size: 1.02rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+body.app-booting #auth-section,
+body.app-booting #app-section {
+  visibility: hidden;
+}
+
+body.app-booting .boot-loader {
+  display: flex;
+}
+
 h1,
 h2,
 h3,
