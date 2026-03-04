@@ -113,7 +113,10 @@
               <button class="tab" data-view="profile">Profile</button>
               <div class="sidebar-group">
                 <button id="admin-nav-toggle" type="button" class="tab sidebar-group-toggle" aria-expanded="false">
-                  <span id="admin-nav-label">Admin (Locked)</span>
+                  <span class="admin-nav-label-wrap">
+                    <span id="admin-nav-lock-icon" class="admin-nav-lock-icon" aria-hidden="true">&#128274;</span>
+                    <span id="admin-nav-label">Admin</span>
+                  </span>
                   <span class="sidebar-group-caret" aria-hidden="true"></span>
                 </button>
                 <div id="admin-subtabs" class="sidebar-subtabs hidden">
@@ -126,8 +129,7 @@
             <section id="sidebar-order-card" class="sidebar-order card">
               <div class="sidebar-order-head">
                 <div class="sidebar-order-title">
-                  <strong>Order</strong>
-                  <span id="sidebar-order-number" class="muted">#001</span>
+                  <strong>Order - <span id="sidebar-order-number" class="muted">#001</span></strong>
                 </div>
                 <div class="sidebar-order-head-actions">
                   <button id="sidebar-order-toggle" type="button" class="secondary sidebar-order-collapse-btn" aria-label="Collapse" title="Collapse" aria-expanded="true">-</button>
@@ -211,8 +213,7 @@
         <section id="mobile-menu-order-card" class="sidebar-order card mobile-menu-order">
           <div class="sidebar-order-head">
             <div class="sidebar-order-title">
-              <strong>Order</strong>
-              <span id="mobile-sidebar-order-number" class="muted">#001</span>
+              <strong>Order - <span id="mobile-sidebar-order-number" class="muted">#001</span></strong>
             </div>
             <div class="sidebar-order-head-actions">
               <button id="mobile-sidebar-order-toggle" type="button" class="secondary sidebar-order-collapse-btn" aria-label="Collapse" title="Collapse" aria-expanded="true">-</button>

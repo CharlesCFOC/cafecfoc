@@ -1516,7 +1516,7 @@ function updateAdminNavState() {
   els.adminNavToggle.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
   els.adminNavToggle.setAttribute('aria-label', isUnlocked ? 'Admin' : 'Admin (locked)');
   if (els.adminNavLabel) {
-    els.adminNavLabel.textContent = isUnlocked ? 'Admin' : 'Admin (Locked)';
+    els.adminNavLabel.textContent = 'Admin';
   }
   els.adminSubtabs.classList.toggle('hidden', !isExpanded);
 }
@@ -2838,34 +2838,65 @@ function startOrdersRealtimePolling() {
   }, ORDERS_REALTIME_POLL_MS);
 }
 
-async function refreshAllData() {
-  const [usersRes, menuItemsRes, inventoryRes, productsRes, salesRes, ordersRes, accountingRes, serviceScheduleRes, tasksRes, menuDraftsRes] = await Promise.all([
+async function refreshPrimaryData() {
+  const [usersRes, menuItemsRes, ordersRes, menuDraftsRes] = await Promise.all([
     api('/api/users'),
     api('/api/menu-items'),
-    api('/api/inventory'),
-    api('/api/products'),
-    api('/api/sales'),
     api('/api/orders'),
-    api('/api/accounting-counts'),
-    api('/api/service-schedule'),
-    api('/api/tasks'),
     api('/api/menu-drafts'),
   ]);
 
+  if (!state.me) return;
+
   state.users = usersRes.users || [];
   state.menuItems = menuItemsRes.menuItems || [];
-  state.inventory = inventoryRes.inventory || [];
-  state.products = productsRes.products || [];
-  state.sales = salesRes.sales || [];
   state.orders = ordersRes.orders || [];
   ordersRealtimeSignature = getOrdersRealtimeSignature(state.orders);
-  state.accountingCounts = accountingRes.accountingCounts || [];
-  state.serviceSchedule = serviceScheduleRes.serviceSchedule || [];
-  state.tasks = tasksRes.tasks || [];
   state.menuDrafts = menuDraftsRes.menuDrafts || [];
   applyLocalMenuDraftFromSharedState();
   menuDraftLastSyncedSignature = menuDraftSignature(getMenuDraftPayload());
   pendingMenuDraftSync = null;
+}
+
+async function refreshSecondaryData() {
+  const [inventoryRes, productsRes, salesRes, accountingRes, serviceScheduleRes, tasksRes] = await Promise.all([
+    api('/api/inventory'),
+    api('/api/products'),
+    api('/api/sales'),
+    api('/api/accounting-counts'),
+    api('/api/service-schedule'),
+    api('/api/tasks'),
+  ]);
+
+  if (!state.me) return;
+
+  state.inventory = inventoryRes.inventory || [];
+  state.products = productsRes.products || [];
+  state.sales = salesRes.sales || [];
+  state.accountingCounts = accountingRes.accountingCounts || [];
+  state.serviceSchedule = serviceScheduleRes.serviceSchedule || [];
+  state.tasks = tasksRes.tasks || [];
+}
+
+async function refreshAllData() {
+  await refreshPrimaryData();
+  await refreshSecondaryData();
+}
+
+async function hydrateAppDataForSignedUser() {
+  try {
+    await refreshPrimaryData();
+    if (state.me) renderAll();
+  } catch (err) {
+    showToast(err?.message || 'Unable to load menu data');
+  }
+
+  try {
+    await refreshSecondaryData();
+    if (state.me) renderAll();
+  } catch (err) {
+    console.error('Secondary refresh failed', err);
+  }
 }
 
 function connectEvents() {
@@ -2952,15 +2983,22 @@ async function bootstrapSession() {
   try {
     const meRes = await api('/api/me');
     state.me = meRes.user;
-    await refreshAllData();
-    showApp();
-    state.currentView = 'menu';
-    setView('menu');
-    connectEvents();
-    renderAll();
   } catch {
     showAuth();
+    return;
   }
+
+  if (!state.me) {
+    showAuth();
+    return;
+  }
+
+  showApp();
+  state.currentView = 'menu';
+  setView('menu');
+  connectEvents();
+  renderAll();
+  void hydrateAppDataForSignedUser();
 }
 
 async function handleAuth(form, endpoint) {
@@ -2973,12 +3011,15 @@ async function handleAuth(form, endpoint) {
   });
 
   state.me = res.user;
-  await refreshAllData();
+  if (!state.me) {
+    throw new Error('Unable to open session');
+  }
   showApp();
   state.currentView = 'menu';
   setView('menu');
   connectEvents();
   renderAll();
+  void hydrateAppDataForSignedUser();
 }
 
 function setAuthSubmitLoading(form, isLoading) {
