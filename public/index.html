@@ -12,52 +12,92 @@
   </button>
 
   <main class="container">
-    <section id="auth-section" class="auth-grid">
-      <article class="card">
-        <h2>Sign In</h2>
-        <form id="login-form" class="stack">
-          <label>
-            Email
-            <input type="email" name="email" required>
-          </label>
-          <label>
-            Password
-            <input type="password" name="password" required>
-          </label>
-          <button type="submit">Sign In</button>
-        </form>
-      </article>
+    <section id="auth-section" class="auth-carousel">
+      <div class="auth-carousel-nav" role="tablist" aria-label="Authentication panels">
+        <button type="button" class="auth-carousel-tab active" data-action="switch-auth-slide" data-auth-slide="login">Login</button>
+        <button type="button" class="auth-carousel-tab" data-action="switch-auth-slide" data-auth-slide="register">New account</button>
+        <button type="button" class="auth-carousel-tab" data-action="switch-auth-slide" data-auth-slide="forgot">Forgot password</button>
+      </div>
 
-      <article class="card">
-        <h2>Create Volunteer Account</h2>
-        <form id="register-form" class="stack">
-          <label>
-            Full name
-            <input type="text" name="name" required>
-          </label>
-          <label>
-            Email
-            <input type="email" name="email" required>
-          </label>
-          <label>
-            Password
-            <input type="password" name="password" required>
-          </label>
-          <label>
-            Phone
-            <input type="text" name="phone" placeholder="Optional">
-          </label>
-          <label>
-            Role
-            <select name="role">
-              <option value="volunteer">Volunteer</option>
-              <option value="prep">Prep</option>
-              <option value="manager">Manager</option>
-            </select>
-          </label>
-          <button type="submit">Create account</button>
-        </form>
-      </article>
+      <div class="auth-carousel-viewport">
+        <div id="auth-carousel-track" class="auth-carousel-track">
+          <article class="card auth-slide">
+            <h2>Sign In</h2>
+            <form id="login-form" class="stack">
+              <label>
+                Email
+                <input type="email" name="email" required>
+              </label>
+              <label>
+                Password
+                <input type="password" name="password" required>
+              </label>
+              <button type="submit">Sign In</button>
+            </form>
+            <p class="auth-slide-links">
+              <button type="button" class="link-button" data-action="switch-auth-slide" data-auth-slide="forgot">Mot de passe oublié ?</button>
+              <button type="button" class="link-button" data-action="switch-auth-slide" data-auth-slide="register">Créer un compte</button>
+            </p>
+          </article>
+
+          <article class="card auth-slide">
+            <h2>Create Volunteer Account</h2>
+            <form id="register-form" class="stack">
+              <label>
+                Full name
+                <input type="text" name="name" required>
+              </label>
+              <label>
+                Email
+                <input type="email" name="email" required>
+              </label>
+              <label>
+                Password
+                <input type="password" name="password" required>
+              </label>
+              <label>
+                Phone
+                <input type="text" name="phone" placeholder="Optional">
+              </label>
+              <label>
+                Role
+                <select name="role">
+                  <option value="volunteer">Volunteer</option>
+                  <option value="prep">Prep</option>
+                  <option value="manager">Manager</option>
+                </select>
+              </label>
+              <button type="submit">Create account</button>
+            </form>
+            <p class="auth-slide-links">
+              <button type="button" class="link-button" data-action="switch-auth-slide" data-auth-slide="login">Retour au login</button>
+            </p>
+          </article>
+
+          <article class="card auth-slide">
+            <h2>Mot de passe oublié</h2>
+            <form id="forgot-form" class="stack">
+              <label>
+                Email
+                <input type="email" name="email" required>
+              </label>
+              <label>
+                Nouveau mot de passe
+                <input type="password" name="newPassword" required>
+              </label>
+              <label>
+                Confirmer le mot de passe
+                <input type="password" name="confirmPassword" required>
+              </label>
+              <button type="submit">Réinitialiser</button>
+            </form>
+            <p class="auth-slide-links">
+              <button type="button" class="link-button" data-action="switch-auth-slide" data-auth-slide="login">Retour au login</button>
+              <button type="button" class="link-button" data-action="switch-auth-slide" data-auth-slide="register">Créer un compte</button>
+            </p>
+          </article>
+        </div>
+      </div>
     </section>
 
     <section id="app-section" class="hidden">

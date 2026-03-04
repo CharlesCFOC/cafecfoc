@@ -81,10 +81,66 @@ body.menu-customer-mode .mobile-nav-toggle {
   margin: 1rem auto 2rem;
 }
 
-.auth-grid {
+.auth-carousel {
+  width: min(640px, 100%);
+  margin: 0 auto;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1rem;
+  gap: 0.7rem;
+}
+
+.auth-carousel-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.auth-carousel-tab {
+  border-radius: 999px;
+  padding: 0.45rem 0.8rem;
+  background: rgba(255, 255, 255, 0.62);
+  min-height: 2rem;
+}
+
+.auth-carousel-tab.active {
+  background: #8fdcff;
+}
+
+.auth-carousel-viewport {
+  overflow: hidden;
+}
+
+.auth-carousel-track {
+  --auth-slide-index: 0;
+  display: flex;
+  width: 100%;
+  transform: translateX(calc(var(--auth-slide-index) * -100%));
+  transition: transform 0.3s ease;
+}
+
+.auth-slide {
+  min-width: 100%;
+}
+
+.auth-slide-links {
+  margin: 0.7rem 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.link-button {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #0b4ea8;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.link-button:hover {
+  filter: none;
+  color: #083a7a;
 }
 
 .card {
@@ -134,6 +190,39 @@ button:hover {
 
 button.secondary {
   background: rgba(255, 255, 255, 0.65);
+}
+
+#auth-section button[type="submit"] {
+  position: relative;
+  min-height: 2.2rem;
+}
+
+#auth-section button[type="submit"].is-loading {
+  color: transparent;
+  pointer-events: none;
+}
+
+#auth-section button[type="submit"].is-loading::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 1rem;
+  height: 1rem;
+  border-radius: 999px;
+  border: 2px solid rgba(17, 17, 17, 0.25);
+  border-top-color: #111;
+  transform: translate(-50%, -50%);
+  animation: auth-submit-spinner 0.8s linear infinite;
+}
+
+@keyframes auth-submit-spinner {
+  from {
+    transform: translate(-50%, -50%) rotate(0deg);
+  }
+  to {
+    transform: translate(-50%, -50%) rotate(360deg);
+  }
 }
 
 .hidden {
@@ -2097,8 +2186,13 @@ td {
 }
 
 @media (max-width: 720px) {
-  .auth-grid {
-    grid-template-columns: 1fr;
+  .auth-carousel-nav {
+    gap: 0.3rem;
+  }
+
+  .auth-carousel-tab {
+    flex: 1 1 calc(50% - 0.2rem);
+    text-align: center;
   }
 
   .table-wrap table {

@@ -1803,7 +1803,8 @@ function destroySession(req, res) {
 }
 
 function sendJson(res, statusCode, payload) {
-  res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.statusCode = statusCode;
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.end(JSON.stringify(payload));
 }
 
@@ -2123,6 +2124,58 @@ async function handleApi(req, res, pathname, user) {
 
     createSession(existingUser.id, res);
     return sendJson(res, 200, { user: publicUser(existingUser) });
+  }
+
+  if (pathname === '/api/forgot-password') {
+    if (method !== 'POST') return methodNotAllowed(res);
+    if (isVercelWithoutSupabase()) {
+      return storageUnavailable(res, 'Supabase must be configured on Vercel to load accounts');
+    }
+
+    if (SUPABASE_ENABLED && IS_VERCEL_RUNTIME) {
+      try {
+        await refreshUsersFromSupabase({ force: true });
+      } catch (err) {
+        return storageUnavailable(res, err.message);
+      }
+    }
+
+    let body;
+    try {
+      body = await parseBody(req);
+    } catch (err) {
+      return badRequest(res, err.message);
+    }
+
+    const email = String(body.email || '').trim().toLowerCase();
+    const newPassword = String(body.newPassword || '');
+
+    if (!email || !newPassword) {
+      return badRequest(res, 'Email and new password are required');
+    }
+    if (newPassword.length < 6) {
+      return badRequest(res, 'New password must contain at least 6 characters');
+    }
+
+    const account = store.users.find((item) => item.email === email);
+    if (!account) {
+      return sendJson(res, 404, { error: 'Account not found' });
+    }
+
+    const previousHash = account.passwordHash;
+    account.passwordHash = hashPassword(newPassword);
+    saveStore();
+
+    try {
+      await persistUser(account);
+    } catch (err) {
+      account.passwordHash = previousHash;
+      saveStore();
+      return storageUnavailable(res, err.message);
+    }
+
+    notify(`Password updated for ${account.name}`);
+    return sendJson(res, 200, { ok: true });
   }
 
   if (pathname === '/api/logout') {

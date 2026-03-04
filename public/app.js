@@ -26,6 +26,7 @@ const state = {
   mobileNavOpen: false,
   adminNavOpen: true,
   accountingEditingEntryId: null,
+  authSlide: 'login',
 };
 
 let eventSource = null;
@@ -35,6 +36,7 @@ const PUSH_PREF_KEY = 'cafecfoc_push_notifications_enabled';
 const DEFAULT_CURRENCY = 'CAD';
 const MENU_SECTIONS = ['food', 'drink'];
 const ADMIN_VIEWS = ['dashboard', 'accounting'];
+const AUTH_SLIDES = ['login', 'register', 'forgot'];
 const ACCOUNTING_DENOMINATIONS = [
   { id: 'coin_5c', type: 'coin', label: '5¢', value: 0.05 },
   { id: 'coin_10c', type: 'coin', label: '10¢', value: 0.1 },
@@ -50,6 +52,7 @@ const ACCOUNTING_DENOMINATIONS = [
 
 const els = {
   authSection: document.getElementById('auth-section'),
+  authCarouselTrack: document.getElementById('auth-carousel-track'),
   appSection: document.getElementById('app-section'),
   currentUser: document.getElementById('current-user'),
   currentRole: document.getElementById('current-role'),
@@ -1268,6 +1271,33 @@ function applyMenuCustomerModeState() {
   applyMobileNavState();
 }
 
+function normalizeAuthSlide(value) {
+  const slide = String(value || '').trim().toLowerCase();
+  return AUTH_SLIDES.includes(slide) ? slide : 'login';
+}
+
+function renderAuthCarousel() {
+  const activeSlide = normalizeAuthSlide(state.authSlide);
+  state.authSlide = activeSlide;
+
+  if (els.authCarouselTrack) {
+    const index = AUTH_SLIDES.indexOf(activeSlide);
+    els.authCarouselTrack.style.setProperty('--auth-slide-index', String(index >= 0 ? index : 0));
+  }
+
+  document.querySelectorAll('[data-action="switch-auth-slide"]').forEach((button) => {
+    const buttonSlide = normalizeAuthSlide(button.dataset.authSlide);
+    const isActive = buttonSlide === activeSlide;
+    button.classList.toggle('active', isActive);
+    button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+  });
+}
+
+function setAuthSlide(nextSlide) {
+  state.authSlide = normalizeAuthSlide(nextSlide);
+  renderAuthCarousel();
+}
+
 function showAuth() {
   state.me = null;
   state.menuEditMode = false;
@@ -1276,6 +1306,7 @@ function showAuth() {
   state.adminNavOpen = true;
   state.accountingEditingEntryId = null;
   state.currentView = 'dashboard';
+  state.authSlide = 'login';
   state.planningEditMode = false;
   state.serviceDrawerOpen = false;
   state.menuCart = [];
@@ -1290,6 +1321,7 @@ function showAuth() {
   }
 
   applyMenuCustomerModeState();
+  renderAuthCarousel();
 }
 
 function showApp() {
@@ -2540,31 +2572,111 @@ async function handleAuth(form, endpoint) {
   renderAll();
 }
 
+function setAuthSubmitLoading(form, isLoading) {
+  if (!form) return;
+  const submitButton = form.querySelector('button[type="submit"]');
+  if (!submitButton) return;
+
+  submitButton.disabled = Boolean(isLoading);
+  submitButton.classList.toggle('is-loading', Boolean(isLoading));
+  submitButton.setAttribute('aria-busy', isLoading ? 'true' : 'false');
+}
+
 function getCartPayload() {
   return state.cart.map((entry) => ({ productId: entry.productId, qty: entry.qty }));
 }
 
 document.getElementById('login-form').addEventListener('submit', async (event) => {
   event.preventDefault();
+  const form = event.currentTarget;
+  if (form.dataset.submitting === '1') return;
+  form.dataset.submitting = '1';
+  setAuthSubmitLoading(form, true);
+
   try {
-    await handleAuth(event.currentTarget, '/api/login');
-    event.currentTarget.reset();
+    await handleAuth(form, '/api/login');
+    form.reset();
     addNotification('Signed in successfully');
   } catch (err) {
     showToast(err.message);
+  } finally {
+    form.dataset.submitting = '0';
+    setAuthSubmitLoading(form, false);
   }
 });
 
 document.getElementById('register-form').addEventListener('submit', async (event) => {
   event.preventDefault();
+  const form = event.currentTarget;
+  if (form.dataset.submitting === '1') return;
+  form.dataset.submitting = '1';
+  setAuthSubmitLoading(form, true);
+
   try {
-    await handleAuth(event.currentTarget, '/api/register');
-    event.currentTarget.reset();
+    await handleAuth(form, '/api/register');
+    form.reset();
     addNotification('Account created and signed in');
   } catch (err) {
     showToast(err.message);
+  } finally {
+    form.dataset.submitting = '0';
+    setAuthSubmitLoading(form, false);
   }
 });
+
+const forgotForm = document.getElementById('forgot-form');
+if (forgotForm) {
+  forgotForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    if (form.dataset.submitting === '1') return;
+
+    const formData = new FormData(form);
+    const email = String(formData.get('email') || '').trim();
+    const newPassword = String(formData.get('newPassword') || '');
+    const confirmPassword = String(formData.get('confirmPassword') || '');
+
+    if (!email || !newPassword) {
+      showToast('Email and new password are required');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      showToast('Password confirmation does not match');
+      return;
+    }
+
+    form.dataset.submitting = '1';
+    setAuthSubmitLoading(form, true);
+
+    try {
+      await api('/api/forgot-password', {
+        method: 'POST',
+        body: { email, newPassword },
+      });
+      form.reset();
+      showToast('Password reset done. You can sign in now.');
+      const loginForm = document.getElementById('login-form');
+      if (loginForm?.elements?.email && !String(loginForm.elements.email.value || '').trim()) {
+        loginForm.elements.email.value = email;
+      }
+      setAuthSlide('login');
+    } catch (err) {
+      showToast(err.message);
+    } finally {
+      form.dataset.submitting = '0';
+      setAuthSubmitLoading(form, false);
+    }
+  });
+}
+
+if (els.authSection) {
+  els.authSection.addEventListener('click', (event) => {
+    const trigger = event.target.closest('[data-action="switch-auth-slide"]');
+    if (!trigger) return;
+    event.preventDefault();
+    setAuthSlide(trigger.dataset.authSlide || 'login');
+  });
+}
 
 document.getElementById('logout-btn').addEventListener('click', async () => {
   try {
