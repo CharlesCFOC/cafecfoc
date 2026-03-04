@@ -50,7 +50,7 @@ const ADMIN_VIEWS = ['dashboard', 'accounting'];
 const ADMIN_UNLOCK_CODE = '7838';
 const AUTH_SLIDES = ['login', 'register', 'forgot'];
 const MENU_DRAFT_SYNC_DELAY_MS = 320;
-const ORDERS_REALTIME_POLL_MS = 450;
+const ORDERS_REALTIME_POLL_MS = 900;
 const ACCOUNTING_DENOMINATIONS = [
   { id: 'coin_5c', type: 'coin', label: '5¢', value: 0.05 },
   { id: 'coin_10c', type: 'coin', label: '10¢', value: 0.1 },
@@ -1554,6 +1554,7 @@ function setView(view) {
   }
   updateAdminNavState();
   applyMenuCustomerModeState();
+  startOrdersRealtimePolling();
 }
 
 function applyMenuCustomerModeState() {
@@ -1598,6 +1599,8 @@ function setAuthSlide(nextSlide) {
 
 function showAuth() {
   state.me = null;
+  state.users = [];
+  state.orders = [];
   state.primaryDataLoaded = false;
   state.menuEditMode = false;
   state.menuCustomerMode = false;
@@ -1943,10 +1946,13 @@ function renderSales() {
     .join('');
 }
 
-function isOrderArchived(order) {
+function areAllOrderItemsDelivered(order) {
   const items = Array.isArray(order?.items) ? order.items : [];
-  const allDelivered = items.length > 0 && items.every((item) => item.delivered === true);
-  return Boolean(order?.archived) || allDelivered;
+  return items.length > 0 && items.every((item) => item.delivered === true);
+}
+
+function isOrderArchived(order) {
+  return Boolean(order?.archived) || areAllOrderItemsDelivered(order);
 }
 
 function renderOrderItemPhoto(item) {
@@ -2021,6 +2027,7 @@ function renderOrderCard(order, archived) {
 function renderOrders() {
   const activeOrders = state.orders.filter((order) => !isOrderArchived(order));
   const archivedOrders = state.orders.filter((order) => isOrderArchived(order));
+  const tab = state.ordersTab === 'archive' ? 'archive' : 'active';
   renderOrdersNavBadge(activeOrders.length);
 
   if (!activeOrders.length && !archivedOrders.length) {
@@ -2030,21 +2037,18 @@ function renderOrders() {
     if (els.ordersListArchive) {
       els.ordersListArchive.innerHTML = '<p>No archived order.</p>';
     }
-  } else {
+  } else if (tab === 'active') {
     if (els.ordersListActive) {
       els.ordersListActive.innerHTML = activeOrders.length
         ? activeOrders.map((order) => renderOrderCard(order, false)).join('')
         : '<p>No active order.</p>';
     }
-
-    if (els.ordersListArchive) {
-      els.ordersListArchive.innerHTML = archivedOrders.length
-        ? archivedOrders.map((order) => renderOrderCard(order, true)).join('')
-        : '<p>No archived order.</p>';
-    }
+  } else if (els.ordersListArchive) {
+    els.ordersListArchive.innerHTML = archivedOrders.length
+      ? archivedOrders.map((order) => renderOrderCard(order, true)).join('')
+      : '<p>No archived order.</p>';
   }
 
-  const tab = state.ordersTab === 'archive' ? 'archive' : 'active';
   if (els.ordersTabActive) {
     els.ordersTabActive.textContent = `Active (${activeOrders.length})`;
     els.ordersTabActive.classList.toggle('active', tab === 'active');
@@ -2835,8 +2839,15 @@ function applyOrdersFromRealtime(nextOrders, { forceRender = false, version = nu
   }
 
   if (!shouldRender) return false;
-  renderOrders();
-  renderStats();
+  if (state.currentView === 'orders') {
+    renderOrders();
+  } else {
+    const activeCount = state.orders.filter((order) => !isOrderArchived(order)).length;
+    renderOrdersNavBadge(activeCount);
+  }
+  if (state.currentView === 'dashboard') {
+    renderStats();
+  }
   renderSidebarOrder();
   return true;
 }
@@ -2867,7 +2878,7 @@ function stopOrdersRealtimePolling() {
 
 function startOrdersRealtimePolling() {
   stopOrdersRealtimePolling();
-  if (!state.me) return;
+  if (!state.me || state.currentView !== 'orders') return;
 
   void syncOrdersFromServer();
   ordersRealtimePollTimer = setInterval(() => {
@@ -2877,18 +2888,20 @@ function startOrdersRealtimePolling() {
 
 async function refreshPrimaryData() {
   state.primaryDataLoaded = false;
-  const bootstrapRes = await api('/api/bootstrap');
+  const bootstrapRes = await api('/api/bootstrap?menuOnly=1');
 
   if (!state.me) return;
 
   state.users = bootstrapRes.users || [];
   state.menuItems = bootstrapRes.menuItems || [];
-  applyOrdersFromRealtime(bootstrapRes.orders || [], {
-    forceRender: false,
-    version: bootstrapRes.ordersVersion,
-  });
+  if (Array.isArray(bootstrapRes.orders)) {
+    applyOrdersFromRealtime(bootstrapRes.orders || [], {
+      forceRender: false,
+      version: bootstrapRes.ordersVersion,
+    });
+    setOrdersRealtimeServerVersion(bootstrapRes.ordersVersion);
+  }
   state.menuDrafts = bootstrapRes.menuDrafts || [];
-  setOrdersRealtimeServerVersion(bootstrapRes.ordersVersion);
   state.primaryDataLoaded = true;
   applyLocalMenuDraftFromSharedState();
   menuDraftLastSyncedSignature = menuDraftSignature(getMenuDraftPayload());
@@ -3943,6 +3956,35 @@ if (els.ordersView) {
       const orderId = event.target.dataset.orderId;
       const lineId = event.target.dataset.lineId;
       const delivered = event.target.checked;
+      const orderIndex = state.orders.findIndex((entry) => entry.id === orderId);
+      const order = orderIndex >= 0 ? state.orders[orderIndex] : null;
+      const item = order && Array.isArray(order.items)
+        ? order.items.find((entry) => String(entry.lineId || '') === lineId)
+        : null;
+
+      const previousState = order && item
+        ? {
+          delivered: item.delivered === true,
+          deliveredAt: item.deliveredAt || null,
+          deliveredBy: item.deliveredBy || null,
+          archived: order.archived === true,
+          archivedAt: order.archivedAt || null,
+          updatedAt: order.updatedAt || null,
+          status: order.status || 'new',
+        }
+        : null;
+
+      if (order && item) {
+        const changedAt = new Date().toISOString();
+        item.delivered = delivered;
+        item.deliveredAt = delivered ? changedAt : null;
+        item.deliveredBy = delivered ? (state.me?.id || null) : null;
+        const shouldArchive = areAllOrderItemsDelivered(order);
+        order.archived = shouldArchive;
+        order.archivedAt = shouldArchive ? (order.archivedAt || changedAt) : null;
+        order.updatedAt = changedAt;
+        renderOrders();
+      }
 
       try {
         const response = await api(`/api/orders/${orderId}/items/${lineId}`, {
@@ -3959,15 +4001,26 @@ if (els.ordersView) {
           state.ordersTab = 'archive';
         }
         renderOrders();
-        renderStats();
+        if (state.currentView === 'dashboard') {
+          renderStats();
+        }
         if (isOrderArchived(order)) {
           showToast('Order archived (all items delivered)');
         } else {
           showToast('Item delivery updated');
         }
       } catch (err) {
+        if (previousState && order && item) {
+          item.delivered = previousState.delivered;
+          item.deliveredAt = previousState.deliveredAt;
+          item.deliveredBy = previousState.deliveredBy;
+          order.archived = previousState.archived;
+          order.archivedAt = previousState.archivedAt;
+          order.updatedAt = previousState.updatedAt;
+          order.status = previousState.status;
+          renderOrders();
+        }
         showToast(err.message);
-        event.target.checked = !delivered;
       }
     }
   });

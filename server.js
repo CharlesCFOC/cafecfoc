@@ -1869,6 +1869,16 @@ async function persistOrderToSupabaseNow(order) {
   ordersLastRefreshAt = Date.now();
 }
 
+function persistOrderToSupabaseDeferred(order, contextLabel = 'orders') {
+  if (!SUPABASE_ENABLED || !supabaseReady) return;
+  if (!order || !order.id) return;
+
+  void persistOrderToSupabaseNow(order).catch((err) => {
+    console.error(`Order sync warning (${contextLabel}): ${err.message}`);
+    scheduleSupabaseFlush();
+  });
+}
+
 const sseClients = new Map();
 const menuDrafts = new Map();
 
@@ -2563,29 +2573,25 @@ async function handleApi(req, res, pathname, user, requestUrl) {
 
   if (pathname === '/api/bootstrap') {
     if (method !== 'GET') return methodNotAllowed(res);
+    const menuOnly = requestUrl?.searchParams?.get('menuOnly') === '1';
 
     if (SUPABASE_ENABLED && IS_VERCEL_RUNTIME) {
-      await Promise.all([
-        refreshUsersFromSupabase().catch((err) => {
-          console.error(`Users refresh error: ${err.message}`);
-        }),
-        refreshMenuItemsFromSupabase().catch((err) => {
-          console.error(`Menu items refresh error: ${err.message}`);
-        }),
-        refreshOrdersFromSupabase().catch((err) => {
-          console.error(`Orders refresh error: ${err.message}`);
-        }),
-      ]);
+      await refreshMenuItemsFromSupabase().catch((err) => {
+        console.error(`Menu items refresh error: ${err.message}`);
+      });
     }
 
     const ordersVersion = refreshOrdersRealtimeVersionFromStore();
-    return sendJson(res, 200, {
+    const payload = {
       users: store.users.map(publicUser),
       menuItems: store.menuItems,
-      orders: store.orders,
       menuDrafts: menuDraftsPayload().menuDrafts,
       ordersVersion,
-    });
+    };
+    if (!menuOnly) {
+      payload.orders = store.orders;
+    }
+    return sendJson(res, 200, payload);
   }
 
   if (pathname === '/api/orders/realtime') {
@@ -3269,14 +3275,6 @@ async function handleApi(req, res, pathname, user, requestUrl) {
     }
 
     if (method === 'POST') {
-      if (SUPABASE_ENABLED && IS_VERCEL_RUNTIME) {
-        try {
-          await refreshOrdersFromSupabase({ force: true });
-        } catch (err) {
-          console.error(`Orders refresh error: ${err.message}`);
-        }
-      }
-
       let body;
       try {
         body = await parseBody(req);
@@ -3369,7 +3367,7 @@ async function handleApi(req, res, pathname, user, requestUrl) {
 
       store.orders.unshift(order);
       saveStore();
-      await persistOrderToSupabaseNow(order);
+      persistOrderToSupabaseDeferred(order, 'create');
 
       if (fromMenu && menuDrafts.size > 0) {
         menuDrafts.clear();
@@ -3403,14 +3401,6 @@ async function handleApi(req, res, pathname, user, requestUrl) {
   if (orderAssignMatch) {
     if (method !== 'PATCH') return methodNotAllowed(res);
 
-    if (SUPABASE_ENABLED && IS_VERCEL_RUNTIME) {
-      try {
-        await refreshOrdersFromSupabase({ force: true });
-      } catch (err) {
-        console.error(`Orders refresh error: ${err.message}`);
-      }
-    }
-
     const order = store.orders.find((entry) => entry.id === orderAssignMatch[1]);
     if (!order) return notFound(res);
 
@@ -3429,7 +3419,7 @@ async function handleApi(req, res, pathname, user, requestUrl) {
     order.assignedTo = assignedTo;
     order.updatedAt = new Date().toISOString();
     saveStore();
-    await persistOrderToSupabaseNow(order);
+    persistOrderToSupabaseDeferred(order, 'assign');
 
     const ordersVersion = broadcastOrdersUpdated();
     const assignedUser = store.users.find((entry) => entry.id === assignedTo);
@@ -3441,14 +3431,6 @@ async function handleApi(req, res, pathname, user, requestUrl) {
   const orderItemMatch = pathname.match(/^\/api\/orders\/([^/]+)\/items\/([^/]+)$/);
   if (orderItemMatch) {
     if (method !== 'PATCH') return methodNotAllowed(res);
-
-    if (SUPABASE_ENABLED && IS_VERCEL_RUNTIME) {
-      try {
-        await refreshOrdersFromSupabase({ force: true });
-      } catch (err) {
-        console.error(`Orders refresh error: ${err.message}`);
-      }
-    }
 
     const [_, orderId, lineId] = orderItemMatch;
     const order = store.orders.find((entry) => entry.id === orderId);
@@ -3477,7 +3459,7 @@ async function handleApi(req, res, pathname, user, requestUrl) {
     order.updatedAt = changedAt;
 
     saveStore();
-    await persistOrderToSupabaseNow(order);
+    persistOrderToSupabaseDeferred(order, 'item-delivered');
 
     const ordersVersion = broadcastOrdersUpdated();
     notify(`${user.name} ${delivered ? 'confirmed' : 'reverted'} delivery of ${item.name}`);
@@ -3488,14 +3470,6 @@ async function handleApi(req, res, pathname, user, requestUrl) {
   const orderStepMatch = pathname.match(/^\/api\/orders\/([^/]+)\/steps\/([^/]+)$/);
   if (orderStepMatch) {
     if (method !== 'PATCH') return methodNotAllowed(res);
-
-    if (SUPABASE_ENABLED && IS_VERCEL_RUNTIME) {
-      try {
-        await refreshOrdersFromSupabase({ force: true });
-      } catch (err) {
-        console.error(`Orders refresh error: ${err.message}`);
-      }
-    }
 
     const [_, orderId, stepKey] = orderStepMatch;
     const order = store.orders.find((entry) => entry.id === orderId);
@@ -3520,7 +3494,7 @@ async function handleApi(req, res, pathname, user, requestUrl) {
     order.updatedAt = changedAt;
 
     saveStore();
-    await persistOrderToSupabaseNow(order);
+    persistOrderToSupabaseDeferred(order, 'step-update');
 
     const ordersVersion = broadcastOrdersUpdated();
     notify(`${user.name} updated ${step.label} (order #${order.id.slice(0, 6)})`);
