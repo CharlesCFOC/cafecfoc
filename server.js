@@ -66,6 +66,7 @@ const supabaseSyncedRowHashes = new Map();
 let usersRefreshPromise = null;
 let usersLastRefreshAt = 0;
 const USERS_REFRESH_THROTTLE_MS = 1_500;
+const MENU_DRAFT_NOTE_MAX_LENGTH = 240;
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -1656,6 +1657,128 @@ function refreshUsersFromSupabase({ force = false } = {}) {
 }
 
 const sseClients = new Map();
+const menuDrafts = new Map();
+
+function normalizeMenuDraftItems(rawItems) {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) {
+    return [];
+  }
+
+  const qtyByMenuItemId = new Map();
+
+  for (const rawItem of rawItems) {
+    const menuItemId = String(rawItem?.menuItemId || '').trim();
+    if (!menuItemId) continue;
+
+    const menuItem = store.menuItems.find((entry) => entry.id === menuItemId);
+    if (!menuItem) continue;
+
+    const qty = Number(rawItem?.qty || 0);
+    if (!Number.isFinite(qty) || qty <= 0) continue;
+
+    const roundedQty = Math.max(1, Math.round(qty));
+    qtyByMenuItemId.set(menuItemId, (qtyByMenuItemId.get(menuItemId) || 0) + roundedQty);
+  }
+
+  const normalized = [];
+  for (const [menuItemId, totalQty] of qtyByMenuItemId.entries()) {
+    const menuItem = store.menuItems.find((entry) => entry.id === menuItemId);
+    if (!menuItem) continue;
+
+    const availableQty = Number(menuItem.quantity || 0);
+    const cappedQty = Number.isFinite(availableQty) && availableQty >= 0
+      ? Math.min(totalQty, Math.floor(availableQty))
+      : totalQty;
+
+    if (!Number.isFinite(cappedQty) || cappedQty <= 0) continue;
+    normalized.push({
+      menuItemId,
+      qty: cappedQty,
+    });
+  }
+
+  normalized.sort((left, right) => left.menuItemId.localeCompare(right.menuItemId));
+  return normalized;
+}
+
+function normalizeMenuDraftNote(rawNote) {
+  return String(rawNote || '').trim().slice(0, MENU_DRAFT_NOTE_MAX_LENGTH);
+}
+
+function menuDraftSignature(items, note) {
+  return JSON.stringify({
+    items: Array.isArray(items) ? items : [],
+    note: String(note || ''),
+  });
+}
+
+function menuDraftsPayload() {
+  const drafts = [];
+
+  for (const [userId, draft] of menuDrafts.entries()) {
+    const normalizedUserId = String(userId || '').trim();
+    if (!normalizedUserId || !draft || typeof draft !== 'object') {
+      menuDrafts.delete(userId);
+      continue;
+    }
+
+    const items = normalizeMenuDraftItems(draft.items);
+    const note = normalizeMenuDraftNote(draft.note);
+    if (!items.length && !note) {
+      menuDrafts.delete(normalizedUserId);
+      continue;
+    }
+
+    const updatedAt = String(draft.updatedAt || '').trim() || new Date().toISOString();
+    drafts.push({
+      userId: normalizedUserId,
+      items,
+      note,
+      updatedAt,
+    });
+  }
+
+  drafts.sort((left, right) => String(right.updatedAt || '').localeCompare(String(left.updatedAt || '')));
+  return { menuDrafts: drafts };
+}
+
+function clearMenuDraftForUser(userId) {
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) return false;
+  return menuDrafts.delete(normalizedUserId);
+}
+
+function setMenuDraftForUser(userId, rawDraft = {}) {
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) return false;
+
+  const items = normalizeMenuDraftItems(rawDraft.items);
+  const note = normalizeMenuDraftNote(rawDraft.note);
+
+  if (!items.length && !note) {
+    return clearMenuDraftForUser(normalizedUserId);
+  }
+
+  const previous = menuDrafts.get(normalizedUserId);
+  const nextSignature = menuDraftSignature(items, note);
+  const previousSignature = previous ? menuDraftSignature(previous.items, previous.note) : '';
+
+  if (nextSignature === previousSignature) {
+    return false;
+  }
+
+  menuDrafts.set(normalizedUserId, {
+    userId: normalizedUserId,
+    items,
+    note,
+    updatedAt: new Date().toISOString(),
+  });
+  return true;
+}
+
+function broadcastMenuDrafts() {
+  broadcast('menu-drafts:updated', menuDraftsPayload());
+}
 
 function hashPassword(password) {
   return crypto
@@ -2180,6 +2303,9 @@ async function handleApi(req, res, pathname, user) {
 
   if (pathname === '/api/logout') {
     if (method !== 'POST') return methodNotAllowed(res);
+    if (user && clearMenuDraftForUser(user.id)) {
+      broadcastMenuDrafts();
+    }
     destroySession(req, res);
     return sendJson(res, 200, { ok: true });
   }
@@ -2201,6 +2327,7 @@ async function handleApi(req, res, pathname, user) {
     sseClients.set(id, { res, userId: user.id });
 
     sseSend(res, 'ready', { ok: true, at: new Date().toISOString() });
+    sseSend(res, 'menu-drafts:updated', menuDraftsPayload());
 
     req.on('close', () => {
       sseClients.delete(id);
@@ -2217,6 +2344,38 @@ async function handleApi(req, res, pathname, user) {
   if (pathname === '/api/users') {
     if (method !== 'GET') return methodNotAllowed(res);
     return sendJson(res, 200, { users: store.users.map(publicUser) });
+  }
+
+  if (pathname === '/api/menu-drafts') {
+    if (method !== 'GET') return methodNotAllowed(res);
+    return sendJson(res, 200, menuDraftsPayload());
+  }
+
+  if (pathname === '/api/menu-draft') {
+    if (method === 'PUT') {
+      let body;
+      try {
+        body = await parseBody(req);
+      } catch (err) {
+        return badRequest(res, err.message);
+      }
+
+      const changed = setMenuDraftForUser(user.id, body || {});
+      if (changed) {
+        broadcastMenuDrafts();
+      }
+      return sendJson(res, 200, menuDraftsPayload());
+    }
+
+    if (method === 'DELETE') {
+      const changed = clearMenuDraftForUser(user.id);
+      if (changed) {
+        broadcastMenuDrafts();
+      }
+      return sendJson(res, 200, menuDraftsPayload());
+    }
+
+    return methodNotAllowed(res);
   }
 
   if (pathname === '/api/profile') {
@@ -2904,6 +3063,10 @@ async function handleApi(req, res, pathname, user) {
 
       store.orders.unshift(order);
       saveStore();
+
+      if (fromMenu && clearMenuDraftForUser(user.id)) {
+        broadcastMenuDrafts();
+      }
 
       broadcast('orders:updated', { orders: store.orders });
       if (fromMenu) {

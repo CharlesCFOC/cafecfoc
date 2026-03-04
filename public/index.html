@@ -16,7 +16,6 @@
       <div class="auth-carousel-nav" role="tablist" aria-label="Authentication panels">
         <button type="button" class="auth-carousel-tab active" data-action="switch-auth-slide" data-auth-slide="login">Login</button>
         <button type="button" class="auth-carousel-tab" data-action="switch-auth-slide" data-auth-slide="register">New account</button>
-        <button type="button" class="auth-carousel-tab" data-action="switch-auth-slide" data-auth-slide="forgot">Forgot password</button>
       </div>
 
       <div class="auth-carousel-viewport">
@@ -107,20 +106,20 @@
           <div class="sidebar-main">
             <h3>CFOC Caf&eacute;</h3>
             <nav class="tabs sidebar-tabs">
+              <button class="tab" data-view="menu">Menu</button>
+              <button class="tab" data-view="orders">Order <span id="orders-nav-badge" class="tab-badge hidden">0</span></button>
+              <button class="tab" data-view="planning">Planning</button>
+              <button class="tab" data-view="profile">Profile</button>
               <div class="sidebar-group">
-                <button id="admin-nav-toggle" type="button" class="tab sidebar-group-toggle active" aria-expanded="true">
-                  <span>Admin</span>
+                <button id="admin-nav-toggle" type="button" class="tab sidebar-group-toggle" aria-expanded="false">
+                  <span id="admin-nav-label">Admin (Locked)</span>
                   <span class="sidebar-group-caret" aria-hidden="true"></span>
                 </button>
-                <div id="admin-subtabs" class="sidebar-subtabs">
-                  <button class="tab tab-sub active" data-view="dashboard">Dashboard</button>
+                <div id="admin-subtabs" class="sidebar-subtabs hidden">
+                  <button class="tab tab-sub" data-view="dashboard">Dashboard</button>
                   <button class="tab tab-sub" data-view="accounting">Accounting</button>
                 </div>
               </div>
-              <button class="tab" data-view="menu">Menu</button>
-              <button class="tab" data-view="orders">Order</button>
-              <button class="tab" data-view="planning">Planning</button>
-              <button class="tab" data-view="profile">Profile</button>
             </nav>
 
             <section id="sidebar-order-card" class="sidebar-order card">
@@ -137,6 +136,9 @@
               <div id="sidebar-order-items" class="sidebar-order-items">
                 <p class="muted">No item selected.</p>
               </div>
+              <div id="sidebar-order-live" class="sidebar-order-live">
+                <p class="muted">No live selection from other accounts.</p>
+              </div>
               <label class="sidebar-order-note">
                 Note
                 <input type="text" id="sidebar-order-note" placeholder="Optional">
@@ -150,12 +152,6 @@
             </section>
           </div>
 
-          <div class="sidebar-account">
-            <div class="sidebar-account-meta">
-              <strong id="current-user">-</strong>
-              <span id="current-role" class="muted"></span>
-            </div>
-          </div>
         </aside>
 
         <div class="content-stack">
@@ -227,6 +223,9 @@
           </div>
           <div id="mobile-sidebar-order-items" class="sidebar-order-items">
             <p class="muted">No item selected.</p>
+          </div>
+          <div id="mobile-sidebar-order-live" class="sidebar-order-live">
+            <p class="muted">No live selection from other accounts.</p>
           </div>
           <label class="sidebar-order-note">
             Note

@@ -18,13 +18,15 @@ const state = {
   orderSummaryCollapsed: false,
   cart: [],
   menuCart: [],
+  menuDrafts: [],
   notifications: [],
   dashboardDateFrom: '',
   dashboardDateTo: '',
-  currentView: 'dashboard',
+  currentView: 'menu',
   menuCustomerMode: false,
   mobileNavOpen: false,
-  adminNavOpen: true,
+  adminNavOpen: false,
+  adminUnlocked: false,
   accountingEditingEntryId: null,
   authSlide: 'login',
 };
@@ -32,11 +34,17 @@ const state = {
 let eventSource = null;
 let pendingPaymentResolver = null;
 let menuDraggedItemId = null;
+let menuDraftSyncTimer = null;
+let menuDraftSyncInFlight = false;
+let pendingMenuDraftSync = null;
+let menuDraftLastSyncedSignature = '';
 const PUSH_PREF_KEY = 'cafecfoc_push_notifications_enabled';
 const DEFAULT_CURRENCY = 'CAD';
 const MENU_SECTIONS = ['food', 'drink'];
 const ADMIN_VIEWS = ['dashboard', 'accounting'];
+const ADMIN_UNLOCK_CODE = '7838';
 const AUTH_SLIDES = ['login', 'register', 'forgot'];
+const MENU_DRAFT_SYNC_DELAY_MS = 320;
 const ACCOUNTING_DENOMINATIONS = [
   { id: 'coin_5c', type: 'coin', label: '5¢', value: 0.05 },
   { id: 'coin_10c', type: 'coin', label: '10¢', value: 0.1 },
@@ -54,8 +62,6 @@ const els = {
   authSection: document.getElementById('auth-section'),
   authCarouselTrack: document.getElementById('auth-carousel-track'),
   appSection: document.getElementById('app-section'),
-  currentUser: document.getElementById('current-user'),
-  currentRole: document.getElementById('current-role'),
   notifList: document.getElementById('notif-list'),
   stats: document.getElementById('stats'),
   dashboardDateFrom: document.getElementById('dashboard-date-from'),
@@ -68,6 +74,7 @@ const els = {
   mobileNavBackdrop: document.getElementById('mobile-nav-backdrop'),
   appSidebar: document.getElementById('app-sidebar'),
   adminNavToggle: document.getElementById('admin-nav-toggle'),
+  adminNavLabel: document.getElementById('admin-nav-label'),
   adminSubtabs: document.getElementById('admin-subtabs'),
   menuView: document.getElementById('view-menu'),
   menuEditToggle: document.getElementById('menu-edit-toggle'),
@@ -85,6 +92,7 @@ const els = {
   ordersView: document.getElementById('view-orders'),
   ordersTabActive: document.getElementById('orders-tab-active'),
   ordersTabArchive: document.getElementById('orders-tab-archive'),
+  ordersNavBadge: document.getElementById('orders-nav-badge'),
   ordersListActive: document.getElementById('orders-list-active'),
   ordersListArchive: document.getElementById('orders-list-archive'),
   accountingView: document.getElementById('view-accounting'),
@@ -119,6 +127,7 @@ const els = {
   orderNotes: document.getElementById('order-notes'),
   sidebarOrderCard: document.getElementById('sidebar-order-card'),
   sidebarOrderItems: document.getElementById('sidebar-order-items'),
+  sidebarOrderLive: document.getElementById('sidebar-order-live'),
   sidebarOrderTotal: document.getElementById('sidebar-order-total'),
   sidebarOrderNumber: document.getElementById('sidebar-order-number'),
   sidebarOrderNote: document.getElementById('sidebar-order-note'),
@@ -127,6 +136,7 @@ const els = {
   sidebarOrderToggle: document.getElementById('sidebar-order-toggle'),
   mobileSidebarOrderCard: document.getElementById('mobile-menu-order-card'),
   mobileSidebarOrderItems: document.getElementById('mobile-sidebar-order-items'),
+  mobileSidebarOrderLive: document.getElementById('mobile-sidebar-order-live'),
   mobileSidebarOrderTotal: document.getElementById('mobile-sidebar-order-total'),
   mobileSidebarOrderNumber: document.getElementById('mobile-sidebar-order-number'),
   mobileSidebarOrderNote: document.getElementById('mobile-sidebar-order-note'),
@@ -971,6 +981,100 @@ function getMenuCartPayload() {
   return state.menuCart.map((entry) => ({ menuItemId: entry.menuItemId, qty: entry.qty }));
 }
 
+function getMenuDraftPayload() {
+  const items = state.menuCart
+    .map((entry) => ({
+      menuItemId: String(entry.menuItemId || '').trim(),
+      qty: Number(entry.qty || 0),
+    }))
+    .filter((entry) => entry.menuItemId && Number.isFinite(entry.qty) && entry.qty > 0)
+    .map((entry) => ({
+      menuItemId: entry.menuItemId,
+      qty: Math.max(1, Math.round(entry.qty)),
+    }))
+    .sort((left, right) => left.menuItemId.localeCompare(right.menuItemId));
+
+  return {
+    items,
+    note: String(getOrderNoteValue() || '').trim().slice(0, 240),
+  };
+}
+
+function menuDraftSignature(payload) {
+  return JSON.stringify(payload || { items: [], note: '' });
+}
+
+function resetMenuDraftSyncState() {
+  if (menuDraftSyncTimer) {
+    clearTimeout(menuDraftSyncTimer);
+    menuDraftSyncTimer = null;
+  }
+  pendingMenuDraftSync = null;
+  menuDraftSyncInFlight = false;
+  menuDraftLastSyncedSignature = '';
+}
+
+function scheduleMenuDraftSync({ immediate = false } = {}) {
+  if (!state.me) return;
+
+  const payload = getMenuDraftPayload();
+  const signature = menuDraftSignature(payload);
+
+  pendingMenuDraftSync = { payload, signature };
+  if (!menuDraftSyncInFlight && signature === menuDraftLastSyncedSignature) {
+    pendingMenuDraftSync = null;
+    return;
+  }
+
+  if (menuDraftSyncTimer) {
+    clearTimeout(menuDraftSyncTimer);
+    menuDraftSyncTimer = null;
+  }
+
+  if (immediate) {
+    void flushMenuDraftSync();
+    return;
+  }
+
+  menuDraftSyncTimer = setTimeout(() => {
+    menuDraftSyncTimer = null;
+    void flushMenuDraftSync();
+  }, MENU_DRAFT_SYNC_DELAY_MS);
+}
+
+async function flushMenuDraftSync() {
+  if (!state.me || menuDraftSyncInFlight) return;
+  const queued = pendingMenuDraftSync;
+  if (!queued) return;
+  if (queued.signature === menuDraftLastSyncedSignature) {
+    pendingMenuDraftSync = null;
+    return;
+  }
+
+  pendingMenuDraftSync = null;
+  menuDraftSyncInFlight = true;
+
+  try {
+    const shouldDelete = queued.payload.items.length === 0 && !queued.payload.note;
+    const response = await api('/api/menu-draft', {
+      method: shouldDelete ? 'DELETE' : 'PUT',
+      body: shouldDelete ? undefined : queued.payload,
+    });
+    if (Array.isArray(response?.menuDrafts)) {
+      state.menuDrafts = response.menuDrafts;
+      renderLiveMenuDrafts();
+    }
+    menuDraftLastSyncedSignature = queued.signature;
+  } catch (err) {
+    console.warn('Menu draft sync failed:', err.message);
+  } finally {
+    menuDraftSyncInFlight = false;
+    if (pendingMenuDraftSync && pendingMenuDraftSync.signature !== menuDraftLastSyncedSignature) {
+      void flushMenuDraftSync();
+    }
+  }
+}
+
 function addMenuItemToCart(menuItemId, qty = 1) {
   const item = findMenuItemById(menuItemId);
   if (!item) {
@@ -1059,11 +1163,13 @@ function handleSidebarOrderItemsClick(event) {
   }
 
   renderSidebarOrder();
+  scheduleMenuDraftSync();
 }
 
 function clearSidebarOrderSelection() {
   state.menuCart = [];
   renderSidebarOrder();
+  scheduleMenuDraftSync();
 }
 
 function applySidebarOrderCollapsedState() {
@@ -1123,6 +1229,7 @@ async function sendSidebarOrder() {
     state.menuCart = [];
     clearOrderNoteValue();
     renderSidebarOrder();
+    scheduleMenuDraftSync({ immediate: true });
     renderStats();
 
     const orderRef = `#${formatOrderNumber(response?.order?.orderNumber || nextOrderNumber)}`;
@@ -1223,19 +1330,49 @@ function isAdminView(view) {
   return ADMIN_VIEWS.includes(String(view || '').trim());
 }
 
+function requestAdminUnlock() {
+  const enteredCode = prompt('Enter admin code to unlock:');
+  if (enteredCode === null) {
+    return false;
+  }
+
+  if (String(enteredCode).trim() !== ADMIN_UNLOCK_CODE) {
+    showToast('Invalid admin code');
+    return false;
+  }
+
+  state.adminUnlocked = true;
+  state.adminNavOpen = true;
+  showToast('Admin unlocked');
+  return true;
+}
+
 function updateAdminNavState() {
   if (!els.adminNavToggle || !els.adminSubtabs) return;
   const adminActive = isAdminView(state.currentView);
-  const isExpanded = Boolean(state.adminNavOpen);
+  const isUnlocked = state.adminUnlocked === true;
+  const isExpanded = isUnlocked && Boolean(state.adminNavOpen);
 
-  els.adminNavToggle.classList.toggle('active', adminActive);
+  els.adminNavToggle.classList.toggle('active', isUnlocked && adminActive);
+  els.adminNavToggle.classList.toggle('locked', !isUnlocked);
   els.adminNavToggle.classList.toggle('collapsed', !isExpanded);
   els.adminNavToggle.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
+  els.adminNavToggle.setAttribute('aria-label', isUnlocked ? 'Admin' : 'Admin (locked)');
+  if (els.adminNavLabel) {
+    els.adminNavLabel.textContent = isUnlocked ? 'Admin' : 'Admin (Locked)';
+  }
   els.adminSubtabs.classList.toggle('hidden', !isExpanded);
 }
 
 function setView(view) {
-  const nextView = String(view || 'dashboard').trim() || 'dashboard';
+  let nextView = String(view || 'menu').trim() || 'menu';
+  if (isAdminView(nextView) && !state.adminUnlocked) {
+    const unlocked = requestAdminUnlock();
+    if (!unlocked) {
+      return;
+    }
+  }
+
   state.currentView = nextView;
   if (isAdminView(nextView)) {
     state.adminNavOpen = true;
@@ -1303,13 +1440,16 @@ function showAuth() {
   state.menuEditMode = false;
   state.menuCustomerMode = false;
   state.mobileNavOpen = false;
-  state.adminNavOpen = true;
+  state.adminNavOpen = false;
+  state.adminUnlocked = false;
   state.accountingEditingEntryId = null;
-  state.currentView = 'dashboard';
+  state.currentView = 'menu';
   state.authSlide = 'login';
   state.planningEditMode = false;
   state.serviceDrawerOpen = false;
   state.menuCart = [];
+  state.menuDrafts = [];
+  resetMenuDraftSyncState();
   closePaymentModal(false);
   els.authSection.classList.remove('hidden');
   els.appSection.classList.add('hidden');
@@ -1475,8 +1615,18 @@ function renderStats() {
 
 function renderHeader() {
   if (!state.me) return;
-  els.currentUser.textContent = state.me.name;
-  els.currentRole.textContent = `(${state.me.role})`;
+  renderOrdersNavBadge();
+}
+
+function getActiveOrdersCount() {
+  return state.orders.filter((order) => !isOrderArchived(order)).length;
+}
+
+function renderOrdersNavBadge(activeCount = null) {
+  if (!els.ordersNavBadge) return;
+  const nextCount = Number.isFinite(activeCount) ? Math.max(0, activeCount) : getActiveOrdersCount();
+  els.ordersNavBadge.textContent = nextCount > 99 ? '99+' : String(nextCount);
+  els.ordersNavBadge.classList.toggle('hidden', nextCount <= 0);
 }
 
 function renderInventory() {
@@ -1679,6 +1829,7 @@ function renderOrderCard(order, archived) {
 function renderOrders() {
   const activeOrders = state.orders.filter((order) => !isOrderArchived(order));
   const archivedOrders = state.orders.filter((order) => isOrderArchived(order));
+  renderOrdersNavBadge(activeOrders.length);
 
   if (!activeOrders.length && !archivedOrders.length) {
     if (els.ordersListActive) {
@@ -2086,6 +2237,86 @@ function renderMenu() {
   applyMenuCustomerModeState();
 }
 
+function formatMenuDraftTimeLabel(iso) {
+  const timestamp = Date.parse(String(iso || ''));
+  if (!Number.isFinite(timestamp)) return '';
+  return new Date(timestamp).toLocaleTimeString('en-CA', {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function renderLiveMenuDrafts() {
+  const containers = [els.sidebarOrderLive, els.mobileSidebarOrderLive].filter(Boolean);
+  if (!containers.length) return;
+
+  const menuItemsById = new Map((state.menuItems || []).map((item) => [item.id, item]));
+  const usersById = new Map((state.users || []).map((user) => [user.id, user]));
+  const myUserId = String(state.me?.id || '').trim();
+
+  const drafts = (Array.isArray(state.menuDrafts) ? state.menuDrafts : [])
+    .filter((draft) => draft && typeof draft === 'object')
+    .filter((draft) => String(draft.userId || '').trim() && String(draft.userId || '').trim() !== myUserId)
+    .map((draft) => {
+      const normalizedItems = (Array.isArray(draft.items) ? draft.items : [])
+        .map((entry) => ({
+          menuItemId: String(entry?.menuItemId || '').trim(),
+          qty: Number(entry?.qty || 0),
+        }))
+        .filter((entry) => entry.menuItemId && Number.isFinite(entry.qty) && entry.qty > 0)
+        .map((entry) => ({
+          menuItemId: entry.menuItemId,
+          qty: Math.max(1, Math.round(entry.qty)),
+        }));
+
+      if (!normalizedItems.length) return null;
+
+      const userId = String(draft.userId || '').trim();
+      const userName = String(usersById.get(userId)?.name || 'Team member').trim() || 'Team member';
+      const note = String(draft.note || '').trim();
+      return {
+        userId,
+        userName,
+        note,
+        updatedAt: String(draft.updatedAt || ''),
+        items: normalizedItems,
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => String(right.updatedAt || '').localeCompare(String(left.updatedAt || '')));
+
+  const bodyMarkup = drafts.length
+    ? `<div class="sidebar-order-live-list">${drafts.map((draft) => {
+      const updatedLabel = formatMenuDraftTimeLabel(draft.updatedAt);
+      const itemsMarkup = draft.items
+        .map((entry) => {
+          const menuItem = menuItemsById.get(entry.menuItemId);
+          const label = escapeHtml(menuItem ? menuItem.name : 'Item');
+          return `<li class="sidebar-order-live-item"><span>${label}</span><strong>x${entry.qty}</strong></li>`;
+        })
+        .join('');
+
+      return `
+        <article class="sidebar-order-live-entry">
+          <div class="sidebar-order-live-entry-head">
+            <strong>${escapeHtml(draft.userName)}</strong>
+            <span class="muted">${escapeHtml(updatedLabel)}</span>
+          </div>
+          <ul class="sidebar-order-live-items-list">${itemsMarkup}</ul>
+          ${draft.note ? `<p class="sidebar-order-live-note">Note: ${escapeHtml(draft.note)}</p>` : ''}
+        </article>
+      `;
+    }).join('')}</div>`
+    : '<p class="muted">No live selection from other accounts.</p>';
+
+  containers.forEach((container) => {
+    container.innerHTML = `
+      <p class="sidebar-order-live-label">Live selection</p>
+      ${bodyMarkup}
+    `;
+  });
+}
+
 function renderSidebarOrder() {
   const orderUIs = [
     {
@@ -2110,6 +2341,7 @@ function renderSidebarOrder() {
     if (ui.number) ui.number.textContent = nextOrderLabel;
   });
 
+  const previousMenuCartSignature = JSON.stringify(state.menuCart || []);
   state.menuCart = state.menuCart
     .map((entry) => {
       const menuItemId = String(entry.menuItemId || '');
@@ -2121,11 +2353,17 @@ function renderSidebarOrder() {
       return { menuItemId, qty: cappedQty };
     })
     .filter((entry) => entry.menuItemId && Number.isFinite(entry.qty) && entry.qty > 0 && findMenuItemById(entry.menuItemId));
+  const nextMenuCartSignature = JSON.stringify(state.menuCart || []);
+  if (nextMenuCartSignature !== previousMenuCartSignature) {
+    scheduleMenuDraftSync();
+  }
 
   const hasSelectedItems = state.menuCart.length > 0;
   orderUIs.forEach((ui) => {
     if (ui.card) ui.card.classList.toggle('sidebar-order-active', hasSelectedItems);
   });
+
+  renderLiveMenuDrafts();
 
   if (!state.menuCart.length) {
     orderUIs.forEach((ui) => {
@@ -2443,7 +2681,7 @@ function renderAll() {
 }
 
 async function refreshAllData() {
-  const [usersRes, menuItemsRes, inventoryRes, productsRes, salesRes, ordersRes, accountingRes, serviceScheduleRes, tasksRes] = await Promise.all([
+  const [usersRes, menuItemsRes, inventoryRes, productsRes, salesRes, ordersRes, accountingRes, serviceScheduleRes, tasksRes, menuDraftsRes] = await Promise.all([
     api('/api/users'),
     api('/api/menu-items'),
     api('/api/inventory'),
@@ -2453,6 +2691,7 @@ async function refreshAllData() {
     api('/api/accounting-counts'),
     api('/api/service-schedule'),
     api('/api/tasks'),
+    api('/api/menu-drafts'),
   ]);
 
   state.users = usersRes.users || [];
@@ -2464,6 +2703,9 @@ async function refreshAllData() {
   state.accountingCounts = accountingRes.accountingCounts || [];
   state.serviceSchedule = serviceScheduleRes.serviceSchedule || [];
   state.tasks = tasksRes.tasks || [];
+  state.menuDrafts = menuDraftsRes.menuDrafts || [];
+  menuDraftLastSyncedSignature = menuDraftSignature(getMenuDraftPayload());
+  pendingMenuDraftSync = null;
 }
 
 function connectEvents() {
@@ -2525,6 +2767,12 @@ function connectEvents() {
     renderAll();
   });
 
+  eventSource.addEventListener('menu-drafts:updated', (event) => {
+    const payload = JSON.parse(event.data);
+    state.menuDrafts = payload.menuDrafts || [];
+    renderLiveMenuDrafts();
+  });
+
   eventSource.addEventListener('notify', (event) => {
     const payload = JSON.parse(event.data);
     addNotification(payload.message, true);
@@ -2547,7 +2795,8 @@ async function bootstrapSession() {
     state.me = meRes.user;
     await refreshAllData();
     showApp();
-    setView(state.currentView || 'dashboard');
+    state.currentView = 'menu';
+    setView('menu');
     connectEvents();
     renderAll();
   } catch {
@@ -2567,7 +2816,8 @@ async function handleAuth(form, endpoint) {
   state.me = res.user;
   await refreshAllData();
   showApp();
-  setView(state.currentView || 'dashboard');
+  state.currentView = 'menu';
+  setView('menu');
   connectEvents();
   renderAll();
 }
@@ -2702,6 +2952,10 @@ document.querySelectorAll('.tab').forEach((tab) => {
 
 if (els.adminNavToggle) {
   els.adminNavToggle.addEventListener('click', () => {
+    if (!state.adminUnlocked) {
+      const unlocked = requestAdminUnlock();
+      if (!unlocked) return;
+    }
     state.adminNavOpen = !state.adminNavOpen;
     updateAdminNavState();
   });
@@ -3021,6 +3275,7 @@ function handleMenuCardClick(event) {
 
   addMenuItemToCart(menuItemId, 1);
   renderSidebarOrder();
+  scheduleMenuDraftSync();
 }
 
 function clearMenuDragVisualState() {
@@ -3141,6 +3396,7 @@ els.menuDrinkGrid.addEventListener('click', handleMenuCardClick);
   if (!input) return;
   input.addEventListener('input', () => {
     setOrderNoteValue(input.value, input);
+    scheduleMenuDraftSync();
   });
 });
 
