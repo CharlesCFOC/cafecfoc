@@ -3064,7 +3064,8 @@ async function handleApi(req, res, pathname, user) {
       store.orders.unshift(order);
       saveStore();
 
-      if (fromMenu && clearMenuDraftForUser(user.id)) {
+      if (fromMenu && menuDrafts.size > 0) {
+        menuDrafts.clear();
         broadcastMenuDrafts();
       }
 

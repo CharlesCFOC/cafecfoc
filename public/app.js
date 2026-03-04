@@ -127,7 +127,6 @@ const els = {
   orderNotes: document.getElementById('order-notes'),
   sidebarOrderCard: document.getElementById('sidebar-order-card'),
   sidebarOrderItems: document.getElementById('sidebar-order-items'),
-  sidebarOrderLive: document.getElementById('sidebar-order-live'),
   sidebarOrderTotal: document.getElementById('sidebar-order-total'),
   sidebarOrderNumber: document.getElementById('sidebar-order-number'),
   sidebarOrderNote: document.getElementById('sidebar-order-note'),
@@ -136,7 +135,6 @@ const els = {
   sidebarOrderToggle: document.getElementById('sidebar-order-toggle'),
   mobileSidebarOrderCard: document.getElementById('mobile-menu-order-card'),
   mobileSidebarOrderItems: document.getElementById('mobile-sidebar-order-items'),
-  mobileSidebarOrderLive: document.getElementById('mobile-sidebar-order-live'),
   mobileSidebarOrderTotal: document.getElementById('mobile-sidebar-order-total'),
   mobileSidebarOrderNumber: document.getElementById('mobile-sidebar-order-number'),
   mobileSidebarOrderNote: document.getElementById('mobile-sidebar-order-note'),
@@ -977,27 +975,119 @@ async function persistMenuOrder() {
   });
 }
 
-function getMenuCartPayload() {
-  return state.menuCart.map((entry) => ({ menuItemId: entry.menuItemId, qty: entry.qty }));
+function normalizeMenuDraftItems(items) {
+  const grouped = new Map();
+
+  for (const rawItem of Array.isArray(items) ? items : []) {
+    const menuItemId = String(rawItem?.menuItemId || '').trim();
+    const qty = Number(rawItem?.qty || 0);
+    if (!menuItemId || !Number.isFinite(qty) || qty <= 0) continue;
+    if (!findMenuItemById(menuItemId)) continue;
+
+    const roundedQty = Math.max(1, Math.round(qty));
+    grouped.set(menuItemId, (grouped.get(menuItemId) || 0) + roundedQty);
+  }
+
+  const normalized = [];
+  for (const [menuItemId, groupedQty] of grouped.entries()) {
+    const item = findMenuItemById(menuItemId);
+    if (!item) continue;
+    const availableQty = Number(item.quantity || 0);
+    const cappedQty = Number.isFinite(availableQty) && availableQty >= 0
+      ? Math.min(groupedQty, Math.floor(availableQty))
+      : groupedQty;
+    if (!Number.isFinite(cappedQty) || cappedQty <= 0) continue;
+    normalized.push({ menuItemId, qty: cappedQty });
+  }
+
+  normalized.sort((left, right) => left.menuItemId.localeCompare(right.menuItemId));
+  return normalized;
 }
 
 function getMenuDraftPayload() {
-  const items = state.menuCart
-    .map((entry) => ({
-      menuItemId: String(entry.menuItemId || '').trim(),
-      qty: Number(entry.qty || 0),
-    }))
-    .filter((entry) => entry.menuItemId && Number.isFinite(entry.qty) && entry.qty > 0)
-    .map((entry) => ({
-      menuItemId: entry.menuItemId,
-      qty: Math.max(1, Math.round(entry.qty)),
-    }))
-    .sort((left, right) => left.menuItemId.localeCompare(right.menuItemId));
+  const items = normalizeMenuDraftItems(state.menuCart);
 
   return {
     items,
     note: String(getOrderNoteValue() || '').trim().slice(0, 240),
   };
+}
+
+function getMenuDraftsWithLocalState() {
+  const drafts = (Array.isArray(state.menuDrafts) ? state.menuDrafts : [])
+    .filter((draft) => draft && typeof draft === 'object')
+    .map((draft) => ({
+      userId: String(draft.userId || '').trim(),
+      items: normalizeMenuDraftItems(draft.items),
+      note: String(draft.note || '').trim().slice(0, 240),
+      updatedAt: String(draft.updatedAt || ''),
+    }))
+    .filter((draft) => draft.userId && (draft.items.length > 0 || draft.note));
+
+  const myUserId = String(state.me?.id || '').trim();
+  if (!myUserId) return drafts;
+
+  const localDraft = getMenuDraftPayload();
+  const withoutMine = drafts.filter((draft) => draft.userId !== myUserId);
+
+  if (localDraft.items.length || localDraft.note) {
+    withoutMine.push({
+      userId: myUserId,
+      items: localDraft.items,
+      note: localDraft.note,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  return withoutMine;
+}
+
+function getCombinedMenuCart() {
+  const grouped = new Map();
+
+  for (const draft of getMenuDraftsWithLocalState()) {
+    for (const item of draft.items) {
+      grouped.set(item.menuItemId, (grouped.get(item.menuItemId) || 0) + Number(item.qty || 0));
+    }
+  }
+
+  return normalizeMenuDraftItems(
+    Array.from(grouped.entries()).map(([menuItemId, qty]) => ({ menuItemId, qty })),
+  );
+}
+
+function getCombinedMenuQty(menuItemId, { excludeCurrentUser = false } = {}) {
+  const targetId = String(menuItemId || '').trim();
+  if (!targetId) return 0;
+
+  const myUserId = String(state.me?.id || '').trim();
+  let total = 0;
+
+  for (const draft of getMenuDraftsWithLocalState()) {
+    if (excludeCurrentUser && myUserId && draft.userId === myUserId) continue;
+    const match = draft.items.find((entry) => entry.menuItemId === targetId);
+    if (!match) continue;
+    total += Number(match.qty || 0);
+  }
+
+  return Number.isFinite(total) ? total : 0;
+}
+
+function applyLocalMenuDraftFromSharedState() {
+  const myUserId = String(state.me?.id || '').trim();
+  if (!myUserId) return;
+
+  const myDraft = (Array.isArray(state.menuDrafts) ? state.menuDrafts : [])
+    .find((draft) => String(draft?.userId || '').trim() === myUserId);
+
+  if (!myDraft) {
+    state.menuCart = [];
+    clearOrderNoteValue();
+    return;
+  }
+
+  state.menuCart = normalizeMenuDraftItems(myDraft.items);
+  setOrderNoteValue(String(myDraft.note || ''), null);
 }
 
 function menuDraftSignature(payload) {
@@ -1062,7 +1152,7 @@ async function flushMenuDraftSync() {
     });
     if (Array.isArray(response?.menuDrafts)) {
       state.menuDrafts = response.menuDrafts;
-      renderLiveMenuDrafts();
+      renderSidebarOrder();
     }
     menuDraftLastSyncedSignature = queued.signature;
   } catch (err) {
@@ -1087,8 +1177,9 @@ function addMenuItemToCart(menuItemId, qty = 1) {
 
   const existing = state.menuCart.find((entry) => entry.menuItemId === menuItemId);
   const nextQty = (existing ? existing.qty : 0) + parsedQty;
+  const nextCombinedQty = getCombinedMenuQty(menuItemId) + parsedQty;
   const availableQty = Number(item.quantity || 0);
-  if (Number.isFinite(availableQty) && availableQty >= 0 && nextQty > availableQty) {
+  if (Number.isFinite(availableQty) && availableQty >= 0 && nextCombinedQty > availableQty) {
     showToast(`Insufficient menu stock for ${item.name}`);
     return;
   }
@@ -1113,8 +1204,11 @@ function setMenuCartQuantity(menuItemId, qty) {
     return;
   }
 
+  const localCurrentQty = state.menuCart.find((cartEntry) => cartEntry.menuItemId === menuItemId)?.qty || 0;
+  const combinedWithoutMineQty = getCombinedMenuQty(menuItemId, { excludeCurrentUser: true });
+  const nextCombinedQty = combinedWithoutMineQty + parsedQty;
   const availableQty = Number(item.quantity || 0);
-  if (Number.isFinite(availableQty) && availableQty >= 0 && parsedQty > availableQty) {
+  if (Number.isFinite(availableQty) && availableQty >= 0 && nextCombinedQty > availableQty) {
     showToast(`Insufficient menu stock for ${item.name}`);
     return;
   }
@@ -1122,6 +1216,11 @@ function setMenuCartQuantity(menuItemId, qty) {
   const entry = state.menuCart.find((cartEntry) => cartEntry.menuItemId === menuItemId);
   if (entry) {
     entry.qty = parsedQty;
+    return;
+  }
+
+  if (localCurrentQty <= 0) {
+    state.menuCart.push({ menuItemId, qty: parsedQty });
   }
 }
 
@@ -1152,13 +1251,14 @@ function handleSidebarOrderItemsClick(event) {
   if (!action || !menuItemId) return;
 
   const entry = state.menuCart.find((item) => item.menuItemId === menuItemId);
-  if (!entry && action !== 'sidebar-order-remove') return;
-
-  if (action === 'sidebar-order-inc' && entry) {
-    setMenuCartQuantity(menuItemId, entry.qty + 1);
-  } else if (action === 'sidebar-order-dec' && entry) {
+  if (action === 'sidebar-order-inc') {
+    const currentQty = entry ? Number(entry.qty || 0) : 0;
+    setMenuCartQuantity(menuItemId, currentQty + 1);
+  } else if (action === 'sidebar-order-dec') {
+    if (!entry) return;
     setMenuCartQuantity(menuItemId, entry.qty - 1);
   } else if (action === 'sidebar-order-remove') {
+    if (!entry) return;
     state.menuCart = state.menuCart.filter((item) => item.menuItemId !== menuItemId);
   }
 
@@ -1191,12 +1291,28 @@ function applySidebarOrderCollapsedState() {
 }
 
 async function sendSidebarOrder() {
-  if (!state.menuCart.length) {
+  if (menuDraftSyncTimer) {
+    clearTimeout(menuDraftSyncTimer);
+    menuDraftSyncTimer = null;
+  }
+  await flushMenuDraftSync();
+
+  try {
+    const latestDrafts = await api('/api/menu-drafts');
+    if (Array.isArray(latestDrafts?.menuDrafts)) {
+      state.menuDrafts = latestDrafts.menuDrafts;
+    }
+  } catch {
+    // non-blocking: keep local/last-known draft state
+  }
+
+  const sharedMenuCart = getCombinedMenuCart();
+  if (!sharedMenuCart.length) {
     showToast('No item in the order');
     return;
   }
 
-  const total = state.menuCart.reduce((acc, entry) => {
+  const total = sharedMenuCart.reduce((acc, entry) => {
     const menuItem = findMenuItemById(entry.menuItemId);
     if (!menuItem) return acc;
     return acc + Number(menuItem.price || 0) * Number(entry.qty || 0);
@@ -1210,7 +1326,10 @@ async function sendSidebarOrder() {
     const response = await api('/api/orders', {
       method: 'POST',
       body: {
-        menuItems: getMenuCartPayload(),
+        menuItems: sharedMenuCart.map((entry) => ({
+          menuItemId: entry.menuItemId,
+          qty: Number(entry.qty || 0),
+        })),
         notes: getOrderNoteValue(),
       },
     });
@@ -1227,6 +1346,7 @@ async function sendSidebarOrder() {
     }
 
     state.menuCart = [];
+    state.menuDrafts = [];
     clearOrderNoteValue();
     renderSidebarOrder();
     scheduleMenuDraftSync({ immediate: true });
@@ -2237,86 +2357,6 @@ function renderMenu() {
   applyMenuCustomerModeState();
 }
 
-function formatMenuDraftTimeLabel(iso) {
-  const timestamp = Date.parse(String(iso || ''));
-  if (!Number.isFinite(timestamp)) return '';
-  return new Date(timestamp).toLocaleTimeString('en-CA', {
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-}
-
-function renderLiveMenuDrafts() {
-  const containers = [els.sidebarOrderLive, els.mobileSidebarOrderLive].filter(Boolean);
-  if (!containers.length) return;
-
-  const menuItemsById = new Map((state.menuItems || []).map((item) => [item.id, item]));
-  const usersById = new Map((state.users || []).map((user) => [user.id, user]));
-  const myUserId = String(state.me?.id || '').trim();
-
-  const drafts = (Array.isArray(state.menuDrafts) ? state.menuDrafts : [])
-    .filter((draft) => draft && typeof draft === 'object')
-    .filter((draft) => String(draft.userId || '').trim() && String(draft.userId || '').trim() !== myUserId)
-    .map((draft) => {
-      const normalizedItems = (Array.isArray(draft.items) ? draft.items : [])
-        .map((entry) => ({
-          menuItemId: String(entry?.menuItemId || '').trim(),
-          qty: Number(entry?.qty || 0),
-        }))
-        .filter((entry) => entry.menuItemId && Number.isFinite(entry.qty) && entry.qty > 0)
-        .map((entry) => ({
-          menuItemId: entry.menuItemId,
-          qty: Math.max(1, Math.round(entry.qty)),
-        }));
-
-      if (!normalizedItems.length) return null;
-
-      const userId = String(draft.userId || '').trim();
-      const userName = String(usersById.get(userId)?.name || 'Team member').trim() || 'Team member';
-      const note = String(draft.note || '').trim();
-      return {
-        userId,
-        userName,
-        note,
-        updatedAt: String(draft.updatedAt || ''),
-        items: normalizedItems,
-      };
-    })
-    .filter(Boolean)
-    .sort((left, right) => String(right.updatedAt || '').localeCompare(String(left.updatedAt || '')));
-
-  const bodyMarkup = drafts.length
-    ? `<div class="sidebar-order-live-list">${drafts.map((draft) => {
-      const updatedLabel = formatMenuDraftTimeLabel(draft.updatedAt);
-      const itemsMarkup = draft.items
-        .map((entry) => {
-          const menuItem = menuItemsById.get(entry.menuItemId);
-          const label = escapeHtml(menuItem ? menuItem.name : 'Item');
-          return `<li class="sidebar-order-live-item"><span>${label}</span><strong>x${entry.qty}</strong></li>`;
-        })
-        .join('');
-
-      return `
-        <article class="sidebar-order-live-entry">
-          <div class="sidebar-order-live-entry-head">
-            <strong>${escapeHtml(draft.userName)}</strong>
-            <span class="muted">${escapeHtml(updatedLabel)}</span>
-          </div>
-          <ul class="sidebar-order-live-items-list">${itemsMarkup}</ul>
-          ${draft.note ? `<p class="sidebar-order-live-note">Note: ${escapeHtml(draft.note)}</p>` : ''}
-        </article>
-      `;
-    }).join('')}</div>`
-    : '<p class="muted">No live selection from other accounts.</p>';
-
-  containers.forEach((container) => {
-    container.innerHTML = `
-      <p class="sidebar-order-live-label">Live selection</p>
-      ${bodyMarkup}
-    `;
-  });
-}
-
 function renderSidebarOrder() {
   const orderUIs = [
     {
@@ -2347,10 +2387,9 @@ function renderSidebarOrder() {
       const menuItemId = String(entry.menuItemId || '');
       const item = findMenuItemById(menuItemId);
       const qty = Number(entry.qty || 0);
-      const availableQty = Number(item?.quantity || 0);
-      const cappedQty = Number.isFinite(availableQty) && availableQty >= 0 ? Math.min(qty, availableQty) : qty;
+      const roundedQty = Math.max(0, Math.round(qty));
 
-      return { menuItemId, qty: cappedQty };
+      return { menuItemId, qty: roundedQty };
     })
     .filter((entry) => entry.menuItemId && Number.isFinite(entry.qty) && entry.qty > 0 && findMenuItemById(entry.menuItemId));
   const nextMenuCartSignature = JSON.stringify(state.menuCart || []);
@@ -2358,14 +2397,13 @@ function renderSidebarOrder() {
     scheduleMenuDraftSync();
   }
 
-  const hasSelectedItems = state.menuCart.length > 0;
+  const sharedMenuCart = getCombinedMenuCart();
+  const hasSelectedItems = sharedMenuCart.length > 0;
   orderUIs.forEach((ui) => {
     if (ui.card) ui.card.classList.toggle('sidebar-order-active', hasSelectedItems);
   });
 
-  renderLiveMenuDrafts();
-
-  if (!state.menuCart.length) {
+  if (!sharedMenuCart.length) {
     orderUIs.forEach((ui) => {
       ui.items.innerHTML = '<p class="muted">No item selected.</p>';
       ui.total.textContent = `0.00 ${DEFAULT_CURRENCY}`;
@@ -2374,7 +2412,7 @@ function renderSidebarOrder() {
   }
 
   let total = 0;
-  const itemsMarkup = state.menuCart
+  const itemsMarkup = sharedMenuCart
     .map((entry) => {
       const item = findMenuItemById(entry.menuItemId);
       if (!item) return '';
@@ -2704,6 +2742,7 @@ async function refreshAllData() {
   state.serviceSchedule = serviceScheduleRes.serviceSchedule || [];
   state.tasks = tasksRes.tasks || [];
   state.menuDrafts = menuDraftsRes.menuDrafts || [];
+  applyLocalMenuDraftFromSharedState();
   menuDraftLastSyncedSignature = menuDraftSignature(getMenuDraftPayload());
   pendingMenuDraftSync = null;
 }
@@ -2770,7 +2809,7 @@ function connectEvents() {
   eventSource.addEventListener('menu-drafts:updated', (event) => {
     const payload = JSON.parse(event.data);
     state.menuDrafts = payload.menuDrafts || [];
-    renderLiveMenuDrafts();
+    renderSidebarOrder();
   });
 
   eventSource.addEventListener('notify', (event) => {
