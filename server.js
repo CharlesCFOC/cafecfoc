@@ -66,6 +66,9 @@ const supabaseSyncedRowHashes = new Map();
 let usersRefreshPromise = null;
 let usersLastRefreshAt = 0;
 const USERS_REFRESH_THROTTLE_MS = 1_500;
+let ordersRefreshPromise = null;
+let ordersLastRefreshAt = 0;
+const ORDERS_REFRESH_THROTTLE_MS = 700;
 const MENU_DRAFT_NOTE_MAX_LENGTH = 240;
 
 const MIME_TYPES = {
@@ -163,6 +166,63 @@ function roundMoney(value) {
   const parsed = Number(value || 0);
   if (!Number.isFinite(parsed)) return 0;
   return Number(parsed.toFixed(2));
+}
+
+function normalizeOrderSource(value, fallback = 'menu') {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'menu' || normalized === 'caisse') {
+    return normalized;
+  }
+  const fallbackNormalized = String(fallback || '').trim().toLowerCase();
+  return fallbackNormalized === 'caisse' ? 'caisse' : 'menu';
+}
+
+function normalizeOrderPaymentMethod(value, fallback = 'unknown') {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'cash') return 'cash';
+  if (normalized === 'card' || normalized === 'credit' || normalized === 'visa' || normalized === 'debit') {
+    return 'card';
+  }
+  const fallbackNormalized = String(fallback || '').trim().toLowerCase();
+  if (fallbackNormalized === 'cash' || fallbackNormalized === 'card') {
+    return fallbackNormalized;
+  }
+  return 'unknown';
+}
+
+function decodeOrderSourceAndPayment(sourceValue) {
+  const raw = String(sourceValue || '').trim().toLowerCase();
+  if (!raw) {
+    return { source: 'menu', paymentMethod: 'unknown' };
+  }
+
+  const sourcePart = raw.split(':')[0];
+  const source = normalizeOrderSource(sourcePart, 'menu');
+  if (source !== 'menu') {
+    return { source, paymentMethod: 'unknown' };
+  }
+
+  const paymentPart = raw.includes(':') ? raw.split(':').slice(1).join(':') : '';
+  return {
+    source,
+    paymentMethod: normalizeOrderPaymentMethod(paymentPart, 'unknown'),
+  };
+}
+
+function getOrderPaymentMethod(order, fallback = 'unknown') {
+  const fromField = normalizeOrderPaymentMethod(order?.paymentMethod, '');
+  if (fromField !== 'unknown') return fromField;
+  const decoded = decodeOrderSourceAndPayment(order?.source);
+  return normalizeOrderPaymentMethod(decoded.paymentMethod, fallback);
+}
+
+function encodeOrderSourceWithPayment(sourceValue, paymentMethodValue) {
+  const source = normalizeOrderSource(sourceValue, 'menu');
+  const paymentMethod = normalizeOrderPaymentMethod(paymentMethodValue, 'unknown');
+  if (source === 'menu' && (paymentMethod === 'cash' || paymentMethod === 'card')) {
+    return `${source}:${paymentMethod}`;
+  }
+  return source;
 }
 
 function isHalfStepPrice(value) {
@@ -310,6 +370,24 @@ function migrateOrderTracking(order) {
   const nextStatus = recalcOrderStatus(order);
   if (order.status !== nextStatus) {
     order.status = nextStatus;
+    changed = true;
+  }
+
+  return changed;
+}
+
+function migrateOrderPayment(order) {
+  let changed = false;
+  const decoded = decodeOrderSourceAndPayment(order?.source);
+  const nextSource = decoded.source;
+  const nextPaymentMethod = getOrderPaymentMethod(order, decoded.paymentMethod);
+
+  if (order.source !== nextSource) {
+    order.source = nextSource;
+    changed = true;
+  }
+  if (order.paymentMethod !== nextPaymentMethod) {
+    order.paymentMethod = nextPaymentMethod;
     changed = true;
   }
 
@@ -713,6 +791,9 @@ if (Array.isArray(store.orders)) {
     if (migrateRecordCurrencies(order)) {
       shouldSaveMigratedStore = true;
     }
+    if (migrateOrderPayment(order)) {
+      shouldSaveMigratedStore = true;
+    }
     if (migrateOrderTracking(order)) {
       shouldSaveMigratedStore = true;
     }
@@ -918,6 +999,8 @@ function dbSaleItemToLocal(row) {
 function localOrderToDb(order) {
   const createdAt = normalizeDateTimeForDb(order.createdAt);
   const updatedAt = normalizeDateTimeForDb(order.updatedAt, createdAt);
+  const source = normalizeOrderSource(order.source, 'menu');
+  const paymentMethod = getOrderPaymentMethod(order, 'unknown');
   return {
     id: order.id,
     status: String(order.status || 'new'),
@@ -931,12 +1014,18 @@ function localOrderToDb(order) {
     items: Array.isArray(order.items) ? order.items : [],
     archived: Boolean(order.archived),
     archived_at: order.archivedAt || null,
-    source: String(order.source || 'menu'),
+    source: encodeOrderSourceWithPayment(source, paymentMethod),
     steps: Array.isArray(order.steps) ? order.steps : [],
   };
 }
 
 function dbOrderToLocal(row) {
+  const decoded = decodeOrderSourceAndPayment(row.source);
+  const paymentMethod = normalizeOrderPaymentMethod(
+    row.payment_method !== undefined ? row.payment_method : row.paymentMethod,
+    decoded.paymentMethod,
+  );
+
   return {
     id: row.id,
     status: String(row.status || 'new'),
@@ -950,7 +1039,8 @@ function dbOrderToLocal(row) {
     items: Array.isArray(row.items) ? row.items : [],
     archived: Boolean(row.archived),
     archivedAt: row.archived_at || null,
-    source: String(row.source || 'menu'),
+    source: decoded.source,
+    paymentMethod,
     steps: Array.isArray(row.steps) ? row.steps : [],
   };
 }
@@ -1654,6 +1744,49 @@ function refreshUsersFromSupabase({ force = false } = {}) {
   });
 
   return usersRefreshPromise;
+}
+
+function refreshOrdersFromSupabase({ force = false } = {}) {
+  if (!SUPABASE_ENABLED) {
+    return Promise.resolve();
+  }
+
+  const now = Date.now();
+  if (!force && (now - ordersLastRefreshAt) < ORDERS_REFRESH_THROTTLE_MS) {
+    return Promise.resolve();
+  }
+
+  if (ordersRefreshPromise) {
+    return ordersRefreshPromise;
+  }
+
+  ordersRefreshPromise = (async () => {
+    const remoteOrders = await loadOrdersFromSupabase();
+    if (Array.isArray(remoteOrders) && remoteOrders.length > 0) {
+      store.orders = remoteOrders;
+      setSupabaseHashState(
+        SUPABASE_ORDERS_TABLE,
+        store.orders.map((order) => localOrderToDb(order)),
+        (row) => String(row.id || ''),
+      );
+    }
+    ordersLastRefreshAt = Date.now();
+  })().finally(() => {
+    ordersRefreshPromise = null;
+  });
+
+  return ordersRefreshPromise;
+}
+
+async function persistOrderToSupabaseNow(order) {
+  if (!SUPABASE_ENABLED || !supabaseReady) return;
+  if (!order || !order.id) return;
+
+  const row = localOrderToDb(order);
+  await upsertRowByIdInSupabase(SUPABASE_ORDERS_TABLE, row);
+  const stateById = getSupabaseHashState(SUPABASE_ORDERS_TABLE);
+  stateById.set(String(row.id || ''), hashSupabaseRow(row));
+  ordersLastRefreshAt = Date.now();
 }
 
 const sseClients = new Map();
@@ -2971,10 +3104,25 @@ async function handleApi(req, res, pathname, user) {
 
   if (pathname === '/api/orders') {
     if (method === 'GET') {
+      if (SUPABASE_ENABLED && IS_VERCEL_RUNTIME) {
+        try {
+          await refreshOrdersFromSupabase();
+        } catch (err) {
+          console.error(`Orders refresh error: ${err.message}`);
+        }
+      }
       return sendJson(res, 200, { orders: store.orders });
     }
 
     if (method === 'POST') {
+      if (SUPABASE_ENABLED && IS_VERCEL_RUNTIME) {
+        try {
+          await refreshOrdersFromSupabase({ force: true });
+        } catch (err) {
+          console.error(`Orders refresh error: ${err.message}`);
+        }
+      }
+
       let body;
       try {
         body = await parseBody(req);
@@ -2990,13 +3138,16 @@ async function handleApi(req, res, pathname, user) {
         return badRequest(res, err.message);
       }
       items = buildTrackedOrderItems(items);
+      const source = fromMenu ? 'menu' : 'caisse';
+      const paymentMethod = normalizeOrderPaymentMethod(body.paymentMethod, fromMenu ? 'cash' : 'unknown');
+      const createdAt = new Date().toISOString();
 
       const steps = [
         {
           key: 'recu',
           label: 'Order received',
           done: true,
-          doneAt: new Date().toISOString(),
+          doneAt: createdAt,
           doneBy: user.id,
         },
         {
@@ -3035,12 +3186,13 @@ async function handleApi(req, res, pathname, user) {
         status: 'new',
         archived: false,
         archivedAt: null,
-        source: fromMenu ? 'menu' : 'caisse',
+        source,
+        paymentMethod,
         assignedTo: body.assignedTo || null,
         notes: String(body.notes || '').trim(),
         steps,
         createdBy: user.id,
-        createdAt: new Date().toISOString(),
+        createdAt,
       };
 
       let menuStockWarnings = [];
@@ -3063,6 +3215,7 @@ async function handleApi(req, res, pathname, user) {
 
       store.orders.unshift(order);
       saveStore();
+      await persistOrderToSupabaseNow(order);
 
       if (fromMenu && menuDrafts.size > 0) {
         menuDrafts.clear();
@@ -3095,6 +3248,14 @@ async function handleApi(req, res, pathname, user) {
   if (orderAssignMatch) {
     if (method !== 'PATCH') return methodNotAllowed(res);
 
+    if (SUPABASE_ENABLED && IS_VERCEL_RUNTIME) {
+      try {
+        await refreshOrdersFromSupabase({ force: true });
+      } catch (err) {
+        console.error(`Orders refresh error: ${err.message}`);
+      }
+    }
+
     const order = store.orders.find((entry) => entry.id === orderAssignMatch[1]);
     if (!order) return notFound(res);
 
@@ -3111,7 +3272,9 @@ async function handleApi(req, res, pathname, user) {
     }
 
     order.assignedTo = assignedTo;
+    order.updatedAt = new Date().toISOString();
     saveStore();
+    await persistOrderToSupabaseNow(order);
 
     broadcast('orders:updated', { orders: store.orders });
     const assignedUser = store.users.find((entry) => entry.id === assignedTo);
@@ -3123,6 +3286,14 @@ async function handleApi(req, res, pathname, user) {
   const orderItemMatch = pathname.match(/^\/api\/orders\/([^/]+)\/items\/([^/]+)$/);
   if (orderItemMatch) {
     if (method !== 'PATCH') return methodNotAllowed(res);
+
+    if (SUPABASE_ENABLED && IS_VERCEL_RUNTIME) {
+      try {
+        await refreshOrdersFromSupabase({ force: true });
+      } catch (err) {
+        console.error(`Orders refresh error: ${err.message}`);
+      }
+    }
 
     const [_, orderId, lineId] = orderItemMatch;
     const order = store.orders.find((entry) => entry.id === orderId);
@@ -3148,8 +3319,10 @@ async function handleApi(req, res, pathname, user) {
     order.archived = shouldArchive;
     order.archivedAt = shouldArchive ? (order.archivedAt || changedAt) : null;
     order.status = recalcOrderStatus(order);
+    order.updatedAt = changedAt;
 
     saveStore();
+    await persistOrderToSupabaseNow(order);
 
     broadcast('orders:updated', { orders: store.orders });
     notify(`${user.name} ${delivered ? 'confirmed' : 'reverted'} delivery of ${item.name}`);
@@ -3160,6 +3333,14 @@ async function handleApi(req, res, pathname, user) {
   const orderStepMatch = pathname.match(/^\/api\/orders\/([^/]+)\/steps\/([^/]+)$/);
   if (orderStepMatch) {
     if (method !== 'PATCH') return methodNotAllowed(res);
+
+    if (SUPABASE_ENABLED && IS_VERCEL_RUNTIME) {
+      try {
+        await refreshOrdersFromSupabase({ force: true });
+      } catch (err) {
+        console.error(`Orders refresh error: ${err.message}`);
+      }
+    }
 
     const [_, orderId, stepKey] = orderStepMatch;
     const order = store.orders.find((entry) => entry.id === orderId);
@@ -3176,12 +3357,15 @@ async function handleApi(req, res, pathname, user) {
     }
 
     const done = typeof body.done === 'boolean' ? body.done : !step.done;
+    const changedAt = new Date().toISOString();
     step.done = done;
-    step.doneAt = done ? new Date().toISOString() : null;
+    step.doneAt = done ? changedAt : null;
     step.doneBy = done ? user.id : null;
     order.status = recalcOrderStatus(order);
+    order.updatedAt = changedAt;
 
     saveStore();
+    await persistOrderToSupabaseNow(order);
 
     broadcast('orders:updated', { orders: store.orders });
     notify(`${user.name} updated ${step.label} (order #${order.id.slice(0, 6)})`);

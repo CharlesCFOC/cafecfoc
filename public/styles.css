@@ -2098,7 +2098,7 @@ td {
   padding: 1rem;
   background:
     radial-gradient(circle at 100% 0%, rgba(255, 255, 255, 0.38), transparent 45%),
-    rgba(255, 255, 255, 0.32);
+    rgba(255, 159, 28, 0.38);
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.18);
 }
 
@@ -2121,6 +2121,45 @@ td {
 .payment-modal-amount {
   margin: 0.55rem 0 0;
   font-size: 0.96rem;
+}
+
+.payment-modal-methods {
+  margin-top: 0.75rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.payment-modal-methods-label {
+  margin: 0;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.payment-modal-method-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  width: fit-content;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.56);
+  padding: 0.24rem 0.58rem;
+  font-size: 0.92rem;
+}
+
+.payment-modal-method-option input[type="radio"] {
+  appearance: auto;
+  -webkit-appearance: radio;
+  min-height: auto;
+  width: 0.95rem;
+  height: 0.95rem;
+  margin: 0;
+  padding: 0;
+  border-radius: 999px;
+  border: none;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 .payment-modal-actions {

@@ -38,6 +38,9 @@ let menuDraftSyncTimer = null;
 let menuDraftSyncInFlight = false;
 let pendingMenuDraftSync = null;
 let menuDraftLastSyncedSignature = '';
+let ordersRealtimePollTimer = null;
+let ordersRealtimePollInFlight = false;
+let ordersRealtimeSignature = '';
 const PUSH_PREF_KEY = 'cafecfoc_push_notifications_enabled';
 const DEFAULT_CURRENCY = 'CAD';
 const MENU_SECTIONS = ['food', 'drink'];
@@ -45,6 +48,7 @@ const ADMIN_VIEWS = ['dashboard', 'accounting'];
 const ADMIN_UNLOCK_CODE = '7838';
 const AUTH_SLIDES = ['login', 'register', 'forgot'];
 const MENU_DRAFT_SYNC_DELAY_MS = 320;
+const ORDERS_REALTIME_POLL_MS = 1200;
 const ACCOUNTING_DENOMINATIONS = [
   { id: 'coin_5c', type: 'coin', label: '5¢', value: 0.05 },
   { id: 'coin_10c', type: 'coin', label: '10¢', value: 0.1 },
@@ -144,6 +148,8 @@ const els = {
   paymentModal: document.getElementById('payment-modal'),
   paymentModalOrderNumber: document.getElementById('payment-modal-order-number'),
   paymentModalAmount: document.getElementById('payment-modal-amount'),
+  paymentModalMethodCash: document.getElementById('payment-modal-method-cash'),
+  paymentModalMethodCard: document.getElementById('payment-modal-method-card'),
   paymentModalConfirm: document.getElementById('payment-modal-confirm'),
   paymentModalCancel: document.getElementById('payment-modal-cancel'),
   profileForm: document.getElementById('profile-form'),
@@ -765,6 +771,31 @@ function getAmountFromCurrencyTotals(totalsByCurrency, currency = DEFAULT_CURREN
   return roundMoney(amount);
 }
 
+function normalizeOrderPaymentMethod(value, fallback = 'unknown') {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'cash') return 'cash';
+  if (normalized === 'card' || normalized === 'credit' || normalized === 'visa' || normalized === 'debit') return 'card';
+  const normalizedFallback = String(fallback || '').trim().toLowerCase();
+  if (normalizedFallback === 'cash' || normalizedFallback === 'card') return normalizedFallback;
+  return 'unknown';
+}
+
+function getOrderPaymentMethod(order) {
+  const directMethod = normalizeOrderPaymentMethod(order?.paymentMethod, '');
+  if (directMethod !== 'unknown') return directMethod;
+
+  const sourceText = String(order?.source || '').trim().toLowerCase();
+  if (sourceText.includes(':')) {
+    const sourceParts = sourceText.split(':');
+    if (sourceParts.length >= 2) {
+      const sourceMethod = normalizeOrderPaymentMethod(sourceParts[1], '');
+      if (sourceMethod !== 'unknown') return sourceMethod;
+    }
+  }
+
+  return 'unknown';
+}
+
 function formatShortDate(dateStr) {
   const date = parseISODate(dateStr);
   if (!date) return dateStr;
@@ -1318,9 +1349,10 @@ async function sendSidebarOrder() {
     return acc + Number(menuItem.price || 0) * Number(entry.qty || 0);
   }, 0);
 
+  await syncOrdersFromServer();
   const nextOrderNumber = getNextOrderNumber();
-  const paymentConfirmed = await requestPaymentConfirmation(total, nextOrderNumber);
-  if (!paymentConfirmed) return;
+  const paymentMethod = await requestPaymentConfirmation(total, nextOrderNumber);
+  if (!paymentMethod) return;
 
   try {
     const response = await api('/api/orders', {
@@ -1331,6 +1363,7 @@ async function sendSidebarOrder() {
           qty: Number(entry.qty || 0),
         })),
         notes: getOrderNoteValue(),
+        paymentMethod,
       },
     });
 
@@ -1368,23 +1401,27 @@ function readFileAsDataUrl(file) {
   });
 }
 
-function closePaymentModal(confirmed) {
+function closePaymentModal(selectedPaymentMethod = null) {
   if (!els.paymentModal) return;
   els.paymentModal.classList.add('hidden');
   if (pendingPaymentResolver) {
     const resolver = pendingPaymentResolver;
     pendingPaymentResolver = null;
-    resolver(Boolean(confirmed));
+    const resolvedMethod = normalizeOrderPaymentMethod(selectedPaymentMethod, 'unknown');
+    resolver(resolvedMethod === 'unknown' ? null : resolvedMethod);
   }
 }
 
 function requestPaymentConfirmation(totalAmount, orderNumber) {
   if (!els.paymentModal || !els.paymentModalAmount || !els.paymentModalOrderNumber) {
-    return Promise.resolve(confirm(`Confirm payment of ${totalAmount.toFixed(2)} ${DEFAULT_CURRENCY} ?`));
+    const confirmed = confirm(`Confirm payment of ${totalAmount.toFixed(2)} ${DEFAULT_CURRENCY} ?`);
+    return Promise.resolve(confirmed ? 'cash' : null);
   }
 
   els.paymentModalOrderNumber.textContent = `#${formatOrderNumber(orderNumber)}`;
   els.paymentModalAmount.textContent = `Payment: ${Number(totalAmount || 0).toFixed(2)} ${DEFAULT_CURRENCY}`;
+  if (els.paymentModalMethodCash) els.paymentModalMethodCash.checked = true;
+  if (els.paymentModalMethodCard) els.paymentModalMethodCard.checked = false;
   els.paymentModal.classList.remove('hidden');
 
   return new Promise((resolve) => {
@@ -1570,7 +1607,7 @@ function showAuth() {
   state.menuCart = [];
   state.menuDrafts = [];
   resetMenuDraftSyncState();
-  closePaymentModal(false);
+  closePaymentModal(null);
   els.authSection.classList.remove('hidden');
   els.appSection.classList.add('hidden');
   document.body.classList.remove('app-active');
@@ -1579,6 +1616,7 @@ function showAuth() {
     eventSource.close();
     eventSource = null;
   }
+  stopOrdersRealtimePolling();
 
   applyMenuCustomerModeState();
   renderAuthCarousel();
@@ -1589,6 +1627,7 @@ function showApp() {
   els.appSection.classList.remove('hidden');
   document.body.classList.add('app-active');
   applyMobileNavState();
+  startOrdersRealtimePolling();
 }
 
 function addNotification(message, withBrowser = false) {
@@ -1642,7 +1681,24 @@ function renderStats() {
   }
 
   const lowStockCount = state.inventory.filter((item) => Number(item.quantity) <= Number(item.threshold)).length;
-  const ordersInRange = state.orders.filter((order) => dateInRange(order.createdAt, from, to)).length;
+  const ordersInRangeRecords = state.orders.filter((order) => dateInRange(order.createdAt, from, to));
+  const ordersInRange = ordersInRangeRecords.length;
+
+  const orderCashTotals = {};
+  const orderCardTotals = {};
+  for (const order of ordersInRangeRecords) {
+    const paymentMethod = getOrderPaymentMethod(order);
+    const targetTotals = paymentMethod === 'cash'
+      ? orderCashTotals
+      : paymentMethod === 'card'
+        ? orderCardTotals
+        : null;
+    if (!targetTotals) continue;
+
+    for (const [currency, amount] of Object.entries(order.totalsByCurrency || {})) {
+      targetTotals[currency] = (targetTotals[currency] || 0) + Number(amount || 0);
+    }
+  }
 
   const salesInRange = getFinancialRevenueRecords().filter((sale) => dateInRange(sale.createdAt, from, to));
   const saleTotals = {};
@@ -1712,6 +1768,14 @@ function renderStats() {
     <article class="stat">
       Sales (period)
       <strong>${moneyTotalsToText(saleTotals)}</strong>
+    </article>
+    <article class="stat">
+      Cash payments (period)
+      <strong>${moneyTotalsToText(orderCashTotals)}</strong>
+    </article>
+    <article class="stat">
+      Card payments (period)
+      <strong>${moneyTotalsToText(orderCardTotals)}</strong>
     </article>
     <article class="stat">
       Cash-flow before sales (day)
@@ -2718,6 +2782,60 @@ function renderAll() {
   renderProfile();
 }
 
+function getOrdersRealtimeSignature(orders) {
+  try {
+    return JSON.stringify(Array.isArray(orders) ? orders : []);
+  } catch {
+    return String(Date.now());
+  }
+}
+
+function applyOrdersFromRealtime(nextOrders, { forceRender = false } = {}) {
+  const normalizedOrders = Array.isArray(nextOrders) ? nextOrders : [];
+  const nextSignature = getOrdersRealtimeSignature(normalizedOrders);
+  const shouldRender = forceRender || nextSignature !== ordersRealtimeSignature;
+
+  state.orders = normalizedOrders;
+  ordersRealtimeSignature = nextSignature;
+
+  if (!shouldRender) return false;
+  renderOrders();
+  renderStats();
+  renderSidebarOrder();
+  return true;
+}
+
+async function syncOrdersFromServer() {
+  if (!state.me || ordersRealtimePollInFlight) return;
+  ordersRealtimePollInFlight = true;
+  try {
+    const response = await api('/api/orders');
+    applyOrdersFromRealtime(response.orders || []);
+  } catch {
+    // silent fallback: SSE might still be active
+  } finally {
+    ordersRealtimePollInFlight = false;
+  }
+}
+
+function stopOrdersRealtimePolling() {
+  if (ordersRealtimePollTimer) {
+    clearInterval(ordersRealtimePollTimer);
+    ordersRealtimePollTimer = null;
+  }
+  ordersRealtimePollInFlight = false;
+}
+
+function startOrdersRealtimePolling() {
+  stopOrdersRealtimePolling();
+  if (!state.me) return;
+
+  void syncOrdersFromServer();
+  ordersRealtimePollTimer = setInterval(() => {
+    void syncOrdersFromServer();
+  }, ORDERS_REALTIME_POLL_MS);
+}
+
 async function refreshAllData() {
   const [usersRes, menuItemsRes, inventoryRes, productsRes, salesRes, ordersRes, accountingRes, serviceScheduleRes, tasksRes, menuDraftsRes] = await Promise.all([
     api('/api/users'),
@@ -2738,6 +2856,7 @@ async function refreshAllData() {
   state.products = productsRes.products || [];
   state.sales = salesRes.sales || [];
   state.orders = ordersRes.orders || [];
+  ordersRealtimeSignature = getOrdersRealtimeSignature(state.orders);
   state.accountingCounts = accountingRes.accountingCounts || [];
   state.serviceSchedule = serviceScheduleRes.serviceSchedule || [];
   state.tasks = tasksRes.tasks || [];
@@ -2784,8 +2903,7 @@ function connectEvents() {
 
   eventSource.addEventListener('orders:updated', (event) => {
     const payload = JSON.parse(event.data);
-    state.orders = payload.orders || [];
-    renderAll();
+    applyOrdersFromRealtime(payload.orders || []);
   });
 
   eventSource.addEventListener('accounting:updated', (event) => {
@@ -3046,17 +3164,20 @@ if (els.planningEditToggle) {
 }
 
 if (els.paymentModalCancel) {
-  els.paymentModalCancel.addEventListener('click', () => closePaymentModal(false));
+  els.paymentModalCancel.addEventListener('click', () => closePaymentModal(null));
 }
 
 if (els.paymentModalConfirm) {
-  els.paymentModalConfirm.addEventListener('click', () => closePaymentModal(true));
+  els.paymentModalConfirm.addEventListener('click', () => {
+    const selectedMethod = els.paymentModalMethodCard?.checked ? 'card' : 'cash';
+    closePaymentModal(selectedMethod);
+  });
 }
 
 if (els.paymentModal) {
   els.paymentModal.addEventListener('click', (event) => {
     if (event.target === els.paymentModal) {
-      closePaymentModal(false);
+      closePaymentModal(null);
     }
   });
 }
@@ -3064,7 +3185,7 @@ if (els.paymentModal) {
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
   if (els.paymentModal && !els.paymentModal.classList.contains('hidden')) {
-    closePaymentModal(false);
+    closePaymentModal(null);
     return;
   }
   if (state.serviceDrawerOpen) {

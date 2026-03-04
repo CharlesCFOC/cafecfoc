@@ -566,6 +566,17 @@
       <p class="payment-modal-tag">Confirmation</p>
       <h3 id="payment-modal-title">Confirm order <span id="payment-modal-order-number">#001</span></h3>
       <p id="payment-modal-amount" class="payment-modal-amount">Payment: 0.00 CAD</p>
+      <div class="payment-modal-methods" role="radiogroup" aria-label="Payment method">
+        <p class="payment-modal-methods-label">Payment method</p>
+        <label class="payment-modal-method-option" for="payment-modal-method-cash">
+          <input id="payment-modal-method-cash" type="radio" name="payment-modal-method" value="cash" checked>
+          <span>Cash</span>
+        </label>
+        <label class="payment-modal-method-option" for="payment-modal-method-card">
+          <input id="payment-modal-method-card" type="radio" name="payment-modal-method" value="card">
+          <span>Card</span>
+        </label>
+      </div>
       <div class="payment-modal-actions">
         <button id="payment-modal-cancel" type="button" class="secondary">Cancel</button>
         <button id="payment-modal-confirm" type="button">Confirm payment</button>
