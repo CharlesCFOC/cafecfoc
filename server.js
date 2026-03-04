@@ -72,6 +72,8 @@ const MENU_ITEMS_REFRESH_THROTTLE_MS = 1_500;
 let ordersRefreshPromise = null;
 let ordersLastRefreshAt = 0;
 const ORDERS_REFRESH_THROTTLE_MS = 700;
+let ordersRealtimeVersion = 0;
+let ordersRealtimeSignature = '';
 const MENU_DRAFT_NOTE_MAX_LENGTH = 240;
 
 const MIME_TYPES = {
@@ -819,6 +821,41 @@ if (!Array.isArray(store.accountingCounts)) {
 if (shouldSaveMigratedStore) {
   saveStore();
 }
+
+function parseRealtimeTime(value) {
+  const parsed = Date.parse(String(value || ''));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function buildOrdersRealtimeSignature(orders) {
+  const list = Array.isArray(orders) ? orders : [];
+  return list
+    .map((order) => {
+      const id = String(order?.id || '');
+      const orderNumber = Number(order?.orderNumber || 0);
+      const archived = order?.archived === true ? 1 : 0;
+      const updatedMs = Math.max(
+        parseRealtimeTime(order?.updatedAt),
+        parseRealtimeTime(order?.archivedAt),
+        parseRealtimeTime(order?.createdAt),
+      );
+      const items = Array.isArray(order?.items) ? order.items : [];
+      const deliveredCount = items.reduce((sum, item) => sum + (item?.delivered === true ? 1 : 0), 0);
+      return `${id}:${orderNumber}:${updatedMs}:${archived}:${items.length}:${deliveredCount}`;
+    })
+    .join('|');
+}
+
+function refreshOrdersRealtimeVersionFromStore({ forceBump = false } = {}) {
+  const nextSignature = buildOrdersRealtimeSignature(store.orders);
+  if (forceBump || nextSignature !== ordersRealtimeSignature) {
+    ordersRealtimeSignature = nextSignature;
+    ordersRealtimeVersion += 1;
+  }
+  return ordersRealtimeVersion;
+}
+
+refreshOrdersRealtimeVersionFromStore({ forceBump: true });
 
 function localUserToDb(user) {
   return {
@@ -1675,6 +1712,7 @@ async function syncStoreFromSupabase() {
       store.orders.map((order) => localOrderToDb(order)),
       (row) => String(row.id || ''),
     );
+    refreshOrdersRealtimeVersionFromStore();
   } else if (store.orders.length > 0) {
     await syncRowsByIdInSupabase(SUPABASE_ORDERS_TABLE, store.orders.map((order) => localOrderToDb(order)));
   }
@@ -1809,6 +1847,7 @@ function refreshOrdersFromSupabase({ force = false } = {}) {
         store.orders.map((order) => localOrderToDb(order)),
         (row) => String(row.id || ''),
       );
+      refreshOrdersRealtimeVersionFromStore();
     }
     ordersLastRefreshAt = Date.now();
   })().finally(() => {
@@ -1826,6 +1865,7 @@ async function persistOrderToSupabaseNow(order) {
   await upsertRowByIdInSupabase(SUPABASE_ORDERS_TABLE, row);
   const stateById = getSupabaseHashState(SUPABASE_ORDERS_TABLE);
   stateById.set(String(row.id || ''), hashSupabaseRow(row));
+  refreshOrdersRealtimeVersionFromStore();
   ordersLastRefreshAt = Date.now();
 }
 
@@ -2101,6 +2141,7 @@ function destroySession(req, res) {
 function sendJson(res, statusCode, payload) {
   res.statusCode = statusCode;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
   res.end(JSON.stringify(payload));
 }
 
@@ -2158,6 +2199,12 @@ function broadcast(eventName, payload) {
   for (const client of sseClients.values()) {
     sseSend(client.res, eventName, payload);
   }
+}
+
+function broadcastOrdersUpdated() {
+  const version = refreshOrdersRealtimeVersionFromStore();
+  broadcast('orders:updated', { orders: store.orders, version });
+  return version;
 }
 
 function notify(message) {
@@ -2314,7 +2361,7 @@ function applyStockFromItems(items) {
   return lowStockWarnings;
 }
 
-async function handleApi(req, res, pathname, user) {
+async function handleApi(req, res, pathname, user, requestUrl) {
   const { method } = req;
 
   if (pathname === '/api/register') {
@@ -2512,6 +2559,65 @@ async function handleApi(req, res, pathname, user) {
   if (pathname === '/api/me') {
     if (method !== 'GET') return methodNotAllowed(res);
     return sendJson(res, 200, { user: publicUser(user) });
+  }
+
+  if (pathname === '/api/bootstrap') {
+    if (method !== 'GET') return methodNotAllowed(res);
+
+    if (SUPABASE_ENABLED && IS_VERCEL_RUNTIME) {
+      await Promise.all([
+        refreshUsersFromSupabase().catch((err) => {
+          console.error(`Users refresh error: ${err.message}`);
+        }),
+        refreshMenuItemsFromSupabase().catch((err) => {
+          console.error(`Menu items refresh error: ${err.message}`);
+        }),
+        refreshOrdersFromSupabase().catch((err) => {
+          console.error(`Orders refresh error: ${err.message}`);
+        }),
+      ]);
+    }
+
+    const ordersVersion = refreshOrdersRealtimeVersionFromStore();
+    return sendJson(res, 200, {
+      users: store.users.map(publicUser),
+      menuItems: store.menuItems,
+      orders: store.orders,
+      menuDrafts: menuDraftsPayload().menuDrafts,
+      ordersVersion,
+    });
+  }
+
+  if (pathname === '/api/orders/realtime') {
+    if (method !== 'GET') return methodNotAllowed(res);
+
+    if (SUPABASE_ENABLED && IS_VERCEL_RUNTIME) {
+      try {
+        await refreshOrdersFromSupabase();
+      } catch (err) {
+        console.error(`Orders refresh error: ${err.message}`);
+      }
+    }
+
+    const currentVersion = refreshOrdersRealtimeVersionFromStore();
+    const rawVersion = requestUrl?.searchParams?.get('version');
+    const parsedVersion = Number(rawVersion);
+    const sinceVersion = Number.isFinite(parsedVersion) && parsedVersion >= 0
+      ? Math.trunc(parsedVersion)
+      : 0;
+
+    if (sinceVersion >= currentVersion) {
+      return sendJson(res, 200, {
+        changed: false,
+        version: currentVersion,
+      });
+    }
+
+    return sendJson(res, 200, {
+      changed: true,
+      version: currentVersion,
+      orders: store.orders,
+    });
   }
 
   if (pathname === '/api/users') {
@@ -3158,7 +3264,8 @@ async function handleApi(req, res, pathname, user) {
           console.error(`Orders refresh error: ${err.message}`);
         }
       }
-      return sendJson(res, 200, { orders: store.orders });
+      const ordersVersion = refreshOrdersRealtimeVersionFromStore();
+      return sendJson(res, 200, { orders: store.orders, ordersVersion });
     }
 
     if (method === 'POST') {
@@ -3269,7 +3376,7 @@ async function handleApi(req, res, pathname, user) {
         broadcastMenuDrafts();
       }
 
-      broadcast('orders:updated', { orders: store.orders });
+      const ordersVersion = broadcastOrdersUpdated();
       if (fromMenu) {
         broadcast('menu-items:updated', { menuItems: store.menuItems });
       }
@@ -3283,6 +3390,7 @@ async function handleApi(req, res, pathname, user) {
 
       return sendJson(res, 201, {
         order,
+        ordersVersion,
         menuItems: fromMenu ? store.menuItems : undefined,
         inventory: menuInventoryChanged ? store.inventory : undefined,
       });
@@ -3323,11 +3431,11 @@ async function handleApi(req, res, pathname, user) {
     saveStore();
     await persistOrderToSupabaseNow(order);
 
-    broadcast('orders:updated', { orders: store.orders });
+    const ordersVersion = broadcastOrdersUpdated();
     const assignedUser = store.users.find((entry) => entry.id === assignedTo);
     notify(`Order #${order.id.slice(0, 6)} assigned to ${assignedUser ? assignedUser.name : 'nobody'}`);
 
-    return sendJson(res, 200, { order });
+    return sendJson(res, 200, { order, ordersVersion });
   }
 
   const orderItemMatch = pathname.match(/^\/api\/orders\/([^/]+)\/items\/([^/]+)$/);
@@ -3371,10 +3479,10 @@ async function handleApi(req, res, pathname, user) {
     saveStore();
     await persistOrderToSupabaseNow(order);
 
-    broadcast('orders:updated', { orders: store.orders });
+    const ordersVersion = broadcastOrdersUpdated();
     notify(`${user.name} ${delivered ? 'confirmed' : 'reverted'} delivery of ${item.name}`);
 
-    return sendJson(res, 200, { order });
+    return sendJson(res, 200, { order, ordersVersion });
   }
 
   const orderStepMatch = pathname.match(/^\/api\/orders\/([^/]+)\/steps\/([^/]+)$/);
@@ -3414,10 +3522,10 @@ async function handleApi(req, res, pathname, user) {
     saveStore();
     await persistOrderToSupabaseNow(order);
 
-    broadcast('orders:updated', { orders: store.orders });
+    const ordersVersion = broadcastOrdersUpdated();
     notify(`${user.name} updated ${step.label} (order #${order.id.slice(0, 6)})`);
 
-    return sendJson(res, 200, { order });
+    return sendJson(res, 200, { order, ordersVersion });
   }
 
   if (pathname === '/api/service-schedule') {
@@ -3888,7 +3996,7 @@ async function requestHandler(req, res) {
 
     if (pathname.startsWith('/api/')) {
       const user = await getSessionUser(req);
-      await handleApi(req, res, pathname, user);
+      await handleApi(req, res, pathname, user, url);
       return;
     }
 

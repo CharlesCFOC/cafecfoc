@@ -29,6 +29,7 @@ const state = {
   adminUnlocked: false,
   accountingEditingEntryId: null,
   authSlide: 'login',
+  primaryDataLoaded: false,
 };
 
 let eventSource = null;
@@ -41,6 +42,7 @@ let menuDraftLastSyncedSignature = '';
 let ordersRealtimePollTimer = null;
 let ordersRealtimePollInFlight = false;
 let ordersRealtimeSignature = '';
+let ordersRealtimeServerVersion = 0;
 const PUSH_PREF_KEY = 'cafecfoc_push_notifications_enabled';
 const DEFAULT_CURRENCY = 'CAD';
 const MENU_SECTIONS = ['food', 'drink'];
@@ -48,7 +50,7 @@ const ADMIN_VIEWS = ['dashboard', 'accounting'];
 const ADMIN_UNLOCK_CODE = '7838';
 const AUTH_SLIDES = ['login', 'register', 'forgot'];
 const MENU_DRAFT_SYNC_DELAY_MS = 320;
-const ORDERS_REALTIME_POLL_MS = 1200;
+const ORDERS_REALTIME_POLL_MS = 450;
 const ACCOUNTING_DENOMINATIONS = [
   { id: 'coin_5c', type: 'coin', label: '5¢', value: 0.05 },
   { id: 'coin_10c', type: 'coin', label: '10¢', value: 0.1 },
@@ -1366,6 +1368,7 @@ async function sendSidebarOrder() {
         paymentMethod,
       },
     });
+    setOrdersRealtimeServerVersion(response?.ordersVersion);
 
     if (response?.order?.id) {
       state.orders = [response.order].concat(state.orders.filter((entry) => entry.id !== response.order.id));
@@ -1431,6 +1434,7 @@ function requestPaymentConfirmation(totalAmount, orderNumber) {
 
 async function api(path, options = {}) {
   const config = { ...options };
+  config.cache = 'no-store';
   config.headers = {
     'Content-Type': 'application/json',
     ...(options.headers || {}),
@@ -1594,6 +1598,7 @@ function setAuthSlide(nextSlide) {
 
 function showAuth() {
   state.me = null;
+  state.primaryDataLoaded = false;
   state.menuEditMode = false;
   state.menuCustomerMode = false;
   state.mobileNavOpen = false;
@@ -1606,6 +1611,7 @@ function showAuth() {
   state.serviceDrawerOpen = false;
   state.menuCart = [];
   state.menuDrafts = [];
+  resetOrdersRealtimeState();
   resetMenuDraftSyncState();
   closePaymentModal(null);
   els.authSection.classList.remove('hidden');
@@ -2255,6 +2261,9 @@ function renderAccounting() {
 
 function renderMenuCards(items) {
   if (!items.length) {
+    if (!state.primaryDataLoaded) {
+      return '<p class="menu-empty">Loading items...</p>';
+    }
     return '<p class="menu-empty">No item in this section.</p>';
   }
 
@@ -2792,13 +2801,38 @@ function getOrdersRealtimeSignature(orders) {
   }
 }
 
-function applyOrdersFromRealtime(nextOrders, { forceRender = false } = {}) {
+function normalizeOrdersRealtimeVersion(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return Math.trunc(parsed);
+}
+
+function setOrdersRealtimeServerVersion(value) {
+  const normalized = normalizeOrdersRealtimeVersion(value);
+  if (normalized === null) return;
+  ordersRealtimeServerVersion = Math.max(ordersRealtimeServerVersion, normalized);
+}
+
+function resetOrdersRealtimeState() {
+  ordersRealtimeSignature = '';
+  ordersRealtimeServerVersion = 0;
+}
+
+function applyOrdersFromRealtime(nextOrders, { forceRender = false, version = null } = {}) {
+  const incomingVersion = normalizeOrdersRealtimeVersion(version);
+  if (incomingVersion !== null && incomingVersion < ordersRealtimeServerVersion) {
+    return false;
+  }
+
   const normalizedOrders = Array.isArray(nextOrders) ? nextOrders : [];
   const nextSignature = getOrdersRealtimeSignature(normalizedOrders);
   const shouldRender = forceRender || nextSignature !== ordersRealtimeSignature;
 
   state.orders = normalizedOrders;
   ordersRealtimeSignature = nextSignature;
+  if (incomingVersion !== null) {
+    ordersRealtimeServerVersion = incomingVersion;
+  }
 
   if (!shouldRender) return false;
   renderOrders();
@@ -2811,8 +2845,11 @@ async function syncOrdersFromServer() {
   if (!state.me || ordersRealtimePollInFlight) return;
   ordersRealtimePollInFlight = true;
   try {
-    const response = await api('/api/orders');
-    applyOrdersFromRealtime(response.orders || []);
+    const response = await api(`/api/orders/realtime?version=${encodeURIComponent(String(ordersRealtimeServerVersion))}`);
+    setOrdersRealtimeServerVersion(response?.version);
+    if (response?.changed) {
+      applyOrdersFromRealtime(response.orders || [], { version: response.version });
+    }
   } catch {
     // silent fallback: SSE might still be active
   } finally {
@@ -2839,20 +2876,20 @@ function startOrdersRealtimePolling() {
 }
 
 async function refreshPrimaryData() {
-  const [usersRes, menuItemsRes, ordersRes, menuDraftsRes] = await Promise.all([
-    api('/api/users'),
-    api('/api/menu-items'),
-    api('/api/orders'),
-    api('/api/menu-drafts'),
-  ]);
+  state.primaryDataLoaded = false;
+  const bootstrapRes = await api('/api/bootstrap');
 
   if (!state.me) return;
 
-  state.users = usersRes.users || [];
-  state.menuItems = menuItemsRes.menuItems || [];
-  state.orders = ordersRes.orders || [];
-  ordersRealtimeSignature = getOrdersRealtimeSignature(state.orders);
-  state.menuDrafts = menuDraftsRes.menuDrafts || [];
+  state.users = bootstrapRes.users || [];
+  state.menuItems = bootstrapRes.menuItems || [];
+  applyOrdersFromRealtime(bootstrapRes.orders || [], {
+    forceRender: false,
+    version: bootstrapRes.ordersVersion,
+  });
+  state.menuDrafts = bootstrapRes.menuDrafts || [];
+  setOrdersRealtimeServerVersion(bootstrapRes.ordersVersion);
+  state.primaryDataLoaded = true;
   applyLocalMenuDraftFromSharedState();
   menuDraftLastSyncedSignature = menuDraftSignature(getMenuDraftPayload());
   pendingMenuDraftSync = null;
@@ -2888,6 +2925,8 @@ async function hydrateAppDataForSignedUser() {
     await refreshPrimaryData();
     if (state.me) renderAll();
   } catch (err) {
+    state.primaryDataLoaded = true;
+    if (state.me) renderAll();
     showToast(err?.message || 'Unable to load menu data');
   }
 
@@ -2936,7 +2975,7 @@ function connectEvents() {
 
   eventSource.addEventListener('orders:updated', (event) => {
     const payload = JSON.parse(event.data);
-    applyOrdersFromRealtime(payload.orders || []);
+    applyOrdersFromRealtime(payload.orders || [], { version: payload.version });
   });
 
   eventSource.addEventListener('accounting:updated', (event) => {
@@ -3870,13 +3909,14 @@ document.getElementById('order-btn').addEventListener('click', async () => {
   }
 
   try {
-    await api('/api/orders', {
+    const response = await api('/api/orders', {
       method: 'POST',
       body: {
         items: getCartPayload(),
         notes: els.orderNotes.value,
       },
     });
+    setOrdersRealtimeServerVersion(response?.ordersVersion);
     state.cart = [];
     els.orderNotes.value = '';
     renderCart();
@@ -3909,6 +3949,7 @@ if (els.ordersView) {
           method: 'PATCH',
           body: { delivered },
         });
+        setOrdersRealtimeServerVersion(response?.ordersVersion);
         const order = response.order;
         const index = state.orders.findIndex((entry) => entry.id === order.id);
         if (index >= 0) {
