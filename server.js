@@ -63,6 +63,9 @@ let supabaseFlushTimer = null;
 let supabaseFlushInFlight = false;
 let supabaseFlushPending = false;
 const supabaseSyncedRowHashes = new Map();
+let usersRefreshPromise = null;
+let usersLastRefreshAt = 0;
+const USERS_REFRESH_THROTTLE_MS = 1_500;
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -1620,6 +1623,36 @@ async function syncStoreFromSupabase() {
   }
 
   saveStore();
+  usersLastRefreshAt = Date.now();
+}
+
+function isVercelWithoutSupabase() {
+  return IS_VERCEL_RUNTIME && !SUPABASE_ENABLED;
+}
+
+function refreshUsersFromSupabase({ force = false } = {}) {
+  if (!SUPABASE_ENABLED) {
+    return Promise.resolve();
+  }
+
+  const now = Date.now();
+  if (!force && (now - usersLastRefreshAt) < USERS_REFRESH_THROTTLE_MS) {
+    return Promise.resolve();
+  }
+
+  if (usersRefreshPromise) {
+    return usersRefreshPromise;
+  }
+
+  usersRefreshPromise = (async () => {
+    const remoteUsers = await loadUsersFromSupabase();
+    store.users = Array.isArray(remoteUsers) ? remoteUsers : [];
+    usersLastRefreshAt = Date.now();
+  })().finally(() => {
+    usersRefreshPromise = null;
+  });
+
+  return usersRefreshPromise;
 }
 
 const sseClients = new Map();
@@ -1738,7 +1771,7 @@ function publicUser(user) {
   };
 }
 
-function getSessionUser(req) {
+async function getSessionUser(req) {
   const cookies = parseCookies(req);
   const token = cookies.cafecfoc_session;
   if (!token) return null;
@@ -1746,7 +1779,15 @@ function getSessionUser(req) {
   const session = parseSessionToken(token);
   if (!session) return null;
 
-  const user = store.users.find((item) => item.id === session.userId);
+  let user = store.users.find((item) => item.id === session.userId);
+  if (!user && SUPABASE_ENABLED && IS_VERCEL_RUNTIME) {
+    try {
+      await refreshUsersFromSupabase({ force: true });
+      user = store.users.find((item) => item.id === session.userId);
+    } catch {
+      user = null;
+    }
+  }
   if (!user) return null;
 
   return user;
@@ -1981,6 +2022,17 @@ async function handleApi(req, res, pathname, user) {
 
   if (pathname === '/api/register') {
     if (method !== 'POST') return methodNotAllowed(res);
+    if (isVercelWithoutSupabase()) {
+      return storageUnavailable(res, 'Supabase must be configured on Vercel to persist accounts');
+    }
+
+    if (SUPABASE_ENABLED && IS_VERCEL_RUNTIME) {
+      try {
+        await refreshUsersFromSupabase({ force: true });
+      } catch (err) {
+        return storageUnavailable(res, err.message);
+      }
+    }
 
     let body;
     try {
@@ -2034,6 +2086,17 @@ async function handleApi(req, res, pathname, user) {
 
   if (pathname === '/api/login') {
     if (method !== 'POST') return methodNotAllowed(res);
+    if (isVercelWithoutSupabase()) {
+      return storageUnavailable(res, 'Supabase must be configured on Vercel to load accounts');
+    }
+
+    if (SUPABASE_ENABLED && IS_VERCEL_RUNTIME) {
+      try {
+        await refreshUsersFromSupabase({ force: true });
+      } catch (err) {
+        return storageUnavailable(res, err.message);
+      }
+    }
 
     let body;
     try {
@@ -3376,7 +3439,7 @@ async function requestHandler(req, res) {
     const pathname = decodeURIComponent(url.pathname);
 
     if (pathname.startsWith('/api/')) {
-      const user = getSessionUser(req);
+      const user = await getSessionUser(req);
       await handleApi(req, res, pathname, user);
       return;
     }
