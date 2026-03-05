@@ -1328,16 +1328,8 @@ async function sendSidebarOrder() {
     clearTimeout(menuDraftSyncTimer);
     menuDraftSyncTimer = null;
   }
-  await flushMenuDraftSync();
-
-  try {
-    const latestDrafts = await api('/api/menu-drafts');
-    if (Array.isArray(latestDrafts?.menuDrafts)) {
-      state.menuDrafts = latestDrafts.menuDrafts;
-    }
-  } catch {
-    // non-blocking: keep local/last-known draft state
-  }
+  // Best effort sync only; do not block send flow on network latency.
+  void flushMenuDraftSync();
 
   const sharedMenuCart = getCombinedMenuCart();
   if (!sharedMenuCart.length) {
@@ -1351,7 +1343,6 @@ async function sendSidebarOrder() {
     return acc + Number(menuItem.price || 0) * Number(entry.qty || 0);
   }, 0);
 
-  await syncOrdersFromServer();
   const nextOrderNumber = getNextOrderNumber();
   const paymentMethod = await requestPaymentConfirmation(total, nextOrderNumber);
   if (!paymentMethod) return;
@@ -2888,7 +2879,28 @@ function startOrdersRealtimePolling() {
 
 async function refreshPrimaryData() {
   state.primaryDataLoaded = false;
-  const bootstrapRes = await api('/api/bootstrap?menuOnly=1');
+  let bootstrapRes;
+  try {
+    bootstrapRes = await api('/api/bootstrap?menuOnly=1');
+  } catch (err) {
+    // Backward compatibility when an older server process is still running.
+    if (err?.status !== 404) {
+      throw err;
+    }
+
+    const [usersRes, menuItemsRes, menuDraftsRes] = await Promise.all([
+      api('/api/users'),
+      api('/api/menu-items'),
+      api('/api/menu-drafts'),
+    ]);
+
+    bootstrapRes = {
+      users: usersRes.users || [],
+      menuItems: menuItemsRes.menuItems || [],
+      menuDrafts: menuDraftsRes.menuDrafts || [],
+      ordersVersion: ordersRealtimeServerVersion,
+    };
+  }
 
   if (!state.me) return;
 
@@ -3997,17 +4009,9 @@ if (els.ordersView) {
         if (index >= 0) {
           state.orders[index] = order;
         }
-        if (isOrderArchived(order)) {
-          state.ordersTab = 'archive';
-        }
         renderOrders();
         if (state.currentView === 'dashboard') {
           renderStats();
-        }
-        if (isOrderArchived(order)) {
-          showToast('Order archived (all items delivered)');
-        } else {
-          showToast('Item delivery updated');
         }
       } catch (err) {
         if (previousState && order && item) {
